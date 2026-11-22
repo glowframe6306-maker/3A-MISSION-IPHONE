@@ -1,9 +1,0 @@
-﻿.claude/
-CLAUDE.md
-.git/
-.vercel/
-.env*
-.backups/
-.data/
-node_modules/
-*.bundle
