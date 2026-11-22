@@ -1,0 +1,9 @@
+{
+  "name": "3a-mission",
+  "version": "1.0.0",
+  "private": true,
+  "description": "3A Mission app with encrypted cloud sync",
+  "dependencies": {
+    "@vercel/blob": "^2.6.1"
+  }
+}
