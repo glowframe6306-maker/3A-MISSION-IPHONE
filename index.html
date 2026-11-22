@@ -1140,6 +1140,8 @@ body.fs-app main{margin:0;width:100%;max-width:none;padding:0}
 #camera .cm-bok{inset:0;-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px);-webkit-mask-image:radial-gradient(ellipse 44% 36% at 50% 46%,transparent 55%,#000 100%);mask-image:radial-gradient(ellipse 44% 36% at 50% 46%,transparent 55%,#000 100%)}
 #camera .cm[data-m=por] .cm-bok{display:block}
 #camera .cm-pl{top:10px;left:0;right:0;text-align:center;font-size:11px;font-weight:700;letter-spacing:.5px;color:#ffd60a}#camera .cm[data-m=por] .cm-pl{display:block}
+#camera .cm-face{display:none;position:absolute;border:2px solid rgba(255,214,10,.9);border-radius:18px;box-shadow:0 0 0 1px rgba(0,0,0,.35),0 0 18px rgba(255,214,10,.25);pointer-events:none}
+#camera .cm[data-m=por].face-found .cm-face{display:block}
 #camera .cm-rec{top:10px;left:50%;transform:translateX(-50%);padding:3px 11px;border-radius:12px;background:#ff3b30;font-size:13px;font-weight:600}#camera .cm.rec .cm-rec{display:block}
 #camera .cm-zoom{bottom:12px}
 #camera .cm-zoom button{width:34px;height:34px;font-size:11px;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
@@ -1778,7 +1780,7 @@ body.fs-app main{margin:0;width:100%;max-width:none;padding:0}
 <div class="notice" style="margin-top:14px">Reminders fire while this app is open (even in a background tab). If the page is completely closed, the browser cannot send a message; you will see it the moment you open the app on that day.</div></section>
 <section class="page" id="camera"><div class="cm" data-m="ph">
 <div class="cm-top"><span class="cm-fmt" id="cmFmt">HEIF</span><button id="cmVP" class="vp" aria-label="Video format"></button><span class="sp"></span><button id="cmFlash" class="ib" aria-label="Flash"><svg viewBox="0 0 24 24"><path d="M13 2L5 14h6l-1 8 8-12h-6z"/></svg></button><button id="cmMore" class="ib" aria-label="Controls"><svg viewBox="0 0 24 24" style="fill:#fff;stroke:none"><circle cx="6" cy="8" r="1.6"/><circle cx="12" cy="8" r="1.6"/><circle cx="18" cy="8" r="1.6"/><circle cx="6" cy="14" r="1.6"/><circle cx="12" cy="14" r="1.6"/><circle cx="18" cy="14" r="1.6"/></svg></button></div>
-<div class="cm-vf" id="cmVF"><video id="cmVideo" playsinline muted autoplay></video><div class="cm-bok"></div><div class="cmx-grid"></div><div class="cm-focus" id="cmFocus"></div><div class="cm-count" id="cmCount"></div><div class="cm-msg" id="cmMsg"></div><div class="cm-rec" id="cmRec">0:00</div><div class="cm-pl">NATURAL LIGHT &nbsp;ƒ1.4</div>
+<div class="cm-vf" id="cmVF"><video id="cmVideo" playsinline muted autoplay></video><div class="cm-bok"></div><div class="cm-face" id="cmFace"></div><div class="cmx-grid"></div><div class="cm-focus" id="cmFocus"></div><div class="cm-count" id="cmCount"></div><div class="cm-msg" id="cmMsg"></div><div class="cm-rec" id="cmRec">0:00</div><div class="cm-pl" id="cmPl">NATURAL LIGHT &nbsp;ƒ1.4</div>
 <div class="cm-vo" id="cmVO"><div><label>RESOLUTION</label><button data-r="HD">HD</button><button data-r="4K">4K</button></div><div><label>FRAME RATE</label><button data-f="24">24</button><button data-f="30">30</button><button data-f="60">60</button></div></div>
 <div class="cm-panel" id="cmPanel"><div class="pr"><button data-p="flash" id="pF"><b><svg viewBox="0 0 24 24"><path d="M13 2L5 14h6l-1 8 8-12h-6z"/></svg></b>FLASH</button><button data-p="ev"><b>±</b>EXPOSURE</button><button data-p="timer" id="pT"><b><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9.5 2h5"/></svg></b>TIMER</button><button data-p="grid"><b><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9.3 4v16M14.7 4v16M4 9.3h16M4 14.7h16"/></svg></b>GRID</button></div><div class="ev"><input type="range" id="cmEv" min="-2" max="2" step=".1" value="0"></div></div>
 <div class="cm-zoom"><button data-z="1" class="on">1×</button><button data-z="2">2×</button><button data-z="5">5×</button></div></div>
@@ -4165,11 +4167,11 @@ const addBlob=async b=>{const vv=(b.type||'').startsWith('video');let th=null,du
 const setThumb=pop=>{const o=items.find(x=>!x.del),t=$('cmThumb');t.style.backgroundImage=o?'url('+url(o)+')':'none';if(pop===true){t.classList.remove('pop');void t.offsetWidth;t.classList.add('pop')}};
 /* ===== Camera (iOS 26 style) ===== */
 const vid=$('cmVideo'),vf=$('cmVF'),camP=$('camera'),cm=camP.querySelector('.cm');
-let stream=null,starting=false,facing='environment',zoom=1,flash=0,timer=0,busy=false,ev=0,mi=3,rec=null,vres='HD',vfps=30,pinched=0;
+let stream=null,starting=false,facing='environment',zoom=1,flash=0,timer=0,busy=false,ev=0,mi=3,rec=null,vres='HD',vfps=30,pinched=0,portraitFace=null,portraitScan=0,portraitDetector=null,portraitApiP=null;
 const MODES=[['tl','TIME-LAPSE'],['slo','SLO-MO'],['vid','VIDEO'],['ph','PHOTO'],['por','PORTRAIT']];
 const mode=()=>MODES[mi][0],isV=()=>mi<3;
 const msg=t=>{const m=$('cmMsg');m.textContent=t||'';m.style.display=t?'flex':'none'};
-const stopCam=()=>{stopRec(1);if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}vid.srcObject=null};
+const stopCam=()=>{stopRec(1);clearInterval(portraitScan);portraitScan=0;portraitFace=null;cm.classList.remove('face-found');if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}vid.srcObject=null};
 const startCam=async()=>{if(stream||starting)return;msg('');
  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||!window.isSecureContext){msg('Live preview needs a secure (https) page.\n\nTap the shutter to open the iPhone camera – the photo is saved to Photos here.');return}
  starting=true;
@@ -4178,16 +4180,68 @@ const startCam=async()=>{if(stream||starting)return;msg('');
   if(!camP.classList.contains('active')){s.getTracks().forEach(t=>t.stop());return}
   stream=s;vid.srcObject=s;await vid.play().catch(()=>{});camP.classList.toggle('front',facing==='user')}
  catch(e){msg('Camera access is off.\n\nAllow Camera for this page in Settings, or tap the shutter to use the iPhone camera.')}
- finally{starting=false}};
+ finally{starting=false;startPortraitScan()}};
 const torch=async on=>{try{const t=stream&&stream.getVideoTracks()[0];if(t&&t.getCapabilities&&t.getCapabilities().torch){await t.applyConstraints({advanced:[{torch:on}]});return true}}catch(e){}return false};
 const click=()=>{try{const a=new(window.AudioContext||window.webkitAudioContext)(),n=a.createBuffer(1,2400,a.sampleRate),d=n.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,3);const s=a.createBufferSource();s.buffer=n;s.connect(a.destination);s.start()}catch(e){}};
-const bokeh=c=>{const w=c.width,h=c.height,s=document.createElement('canvas');s.width=w;s.height=h;const sx=s.getContext('2d');sx.drawImage(c,0,0);
- const t=document.createElement('canvas');t.width=Math.round(w/16)||1;t.height=Math.round(h/16)||1;t.getContext('2d').drawImage(c,0,0,t.width,t.height);
- const cx=c.getContext('2d');cx.imageSmoothingEnabled=true;cx.drawImage(t,0,0,w,h);
- const g=sx.createRadialGradient(w/2,h*.46,h*.16,w/2,h*.46,h*.38);g.addColorStop(0,'#000');g.addColorStop(1,'rgba(0,0,0,0)');sx.globalCompositeOperation='destination-in';sx.fillStyle=g;sx.fillRect(0,0,w,h);cx.drawImage(s,0,0)};
+const detectPortraitFace=async source=>{
+ try{
+  if(!portraitDetector&&window.FaceDetector)portraitDetector=new FaceDetector({fastMode:true,maxDetectedFaces:1});
+  if(portraitDetector){
+   const faces=await portraitDetector.detect(source);
+   if(faces&&faces.length){const b=faces[0].boundingBox;return {x:b.x,y:b.y,w:b.width,h:b.height}}
+  }
+  if(!portraitApiP){
+   portraitApiP=new Promise((resolve,reject)=>{
+    const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js';
+    s.onload=async()=>{try{if(faceapi.tf){try{await faceapi.tf.setBackend('webgl')}catch(e){await faceapi.tf.setBackend('cpu')}await faceapi.tf.ready()}await faceapi.nets.tinyFaceDetector.loadFromUri('https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model');resolve(faceapi)}catch(e){reject(e)}};s.onerror=reject;document.head.appendChild(s);
+   }).catch(e=>{portraitApiP=null;throw e});
+  }
+  const api=await portraitApiP;
+  const f=await api.detectSingleFace(source,new api.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.35}));
+  if(!f)return null;
+  const b=f.box;return {x:b.x,y:b.y,w:b.width,h:b.height};
+ }catch(e){return null}
+};
+const cmBok=()=>document.querySelector('#camera .cm-bok');
+const updateLivePortrait=async()=>{
+ if(mode()!=='por'||!stream||vid.readyState<2)return;
+ const sw=320,sh=Math.round(sw*vid.videoHeight/Math.max(1,vid.videoWidth));
+ const c=document.createElement('canvas');c.width=sw;c.height=sh||1;c.getContext('2d').drawImage(vid,0,0,c.width,c.height);
+ const f=await detectPortraitFace(c);
+ portraitFace=f;
+ if(f){
+  const sx=vf.clientWidth/c.width,sy=vf.clientHeight/c.height;
+  const face=$('cmFace'),left=facing==='user'?(c.width-f.x-f.w)*sx:f.x*sx;
+  face.style.left=left+'px';face.style.top=(f.y*sy)+'px';face.style.width=(f.w*sx)+'px';face.style.height=(f.h*sy)+'px';
+  cm.classList.add('face-found');$('cmPl').textContent='FACE FOUND · HOLD STILL';
+  const cx=(facing==='user'?(c.width-f.x-f.w/2):f.x+f.w/2)*sx,cy=(f.y+f.h*2.25)*sy,rx=Math.max(f.w*1.55*sx,vf.clientWidth*.38),ry=Math.max(f.h*3.1*sy,vf.clientHeight*.48);
+  const bok=cmBok();bok.style.webkitMaskImage='radial-gradient(ellipse '+rx+'px '+ry+'px at '+cx+'px '+cy+'px,transparent 58%,#000 100%)';bok.style.maskImage=bok.style.webkitMaskImage;
+ }else{
+  cm.classList.remove('face-found');$('cmPl').textContent='FIND A CLEAR FACE';
+  const bok=cmBok();bok.style.webkitMaskImage='';bok.style.maskImage='';
+ }
+};
+const startPortraitScan=()=>{
+  clearInterval(portraitScan);portraitScan=0;
+  if(mode()!=='por'||!stream)return;
+  $('cmPl').textContent='FIND A CLEAR FACE';
+  portraitScan=setInterval(updateLivePortrait,650);
+  updateLivePortrait();
+};
+const bokeh=async c=>{
+ const w=c.width,h=c.height,f=await detectPortraitFace(c);
+ let cx=w/2,cy=h*.46,rx=w*.44,ry=h*.36;
+ if(f){cx=facing==='user'?w-(f.x+f.w/2):f.x+f.w/2;cy=f.y+f.h*2.15;rx=Math.max(f.w*1.7,w*.34);ry=Math.max(f.h*3.4,h*.44)}
+ const s=document.createElement('canvas');s.width=w;s.height=h;const sx=s.getContext('2d');sx.drawImage(c,0,0);
+ const t=document.createElement('canvas');t.width=Math.max(1,Math.round(w/14));t.height=Math.max(1,Math.round(h/14));t.getContext('2d').drawImage(c,0,0,t.width,t.height);
+ const cx2=c.getContext('2d');cx2.imageSmoothingEnabled=true;cx2.drawImage(t,0,0,w,h);
+ const m=document.createElement('canvas');m.width=w;m.height=h;const mx=m.getContext('2d');mx.save();mx.translate(cx,cy);mx.scale(rx,ry);const g=mx.createRadialGradient(0,0,.2,0,0,1);g.addColorStop(0,'rgba(255,255,255,1)');g.addColorStop(.82,'rgba(255,255,255,1)');g.addColorStop(1,'rgba(255,255,255,0)');mx.fillStyle=g;mx.beginPath();mx.arc(0,0,1,0,Math.PI*2);mx.fill();mx.restore();
+ sx.globalCompositeOperation='destination-in';sx.drawImage(m,0,0);cx2.drawImage(s,0,0);
+};
 const grab=()=>new Promise(res=>{const vw=vid.videoWidth,vh=vid.videoHeight,bw=vf.clientWidth,bh=vf.clientHeight,s=Math.max(bw/vw,bh/vh),rw=bw/s/zoom,rh=bh/s/zoom,c=document.createElement('canvas');c.width=Math.round(rw);c.height=Math.round(rh);const x=c.getContext('2d');x.drawImage(vid,(vw-rw)/2,(vh-rh)/2,rw,rh,0,0,c.width,c.height);
- if(mode()==='por')bokeh(c);if(ev){x.fillStyle=ev>0?'rgba(255,255,255,'+ev*.1+')':'rgba(0,0,0,'+(-ev)*.14+')';x.fillRect(0,0,c.width,c.height)}
- c.toBlob(res,'image/jpeg',.93)});
+ if(mode()==='por')bokeh(c).then(()=>{if(ev){x.fillStyle=ev>0?'rgba(255,255,255,'+ev*.1+')':'rgba(0,0,0,'+(-ev)*.14+')';x.fillRect(0,0,c.width,c.height)}c.toBlob(res,'image/jpeg',.93)});
+ else{if(ev){x.fillStyle=ev>0?'rgba(255,255,255,'+ev*.1+')':'rgba(0,0,0,'+(-ev)*.14+')';x.fillRect(0,0,c.width,c.height)}c.toBlob(res,'image/jpeg',.93)}
+});
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 const cd=async()=>{for(let n=timer;n>0;n--){$('cmCount').textContent=n;await wait(1000)}$('cmCount').textContent=''};
 function stopRec(drop){const r=rec;if(!r)return;rec=null;r.drop=drop;clearInterval(r.tick);try{if(r.mr.state!=='inactive')r.mr.stop()}catch(e){}cm.classList.remove('rec');torch(false)}
@@ -4211,7 +4265,9 @@ const sync=()=>{$('cmFlash').classList.toggle('on',!!flash);$('pF').classList.to
 const applyMode=()=>{cm.dataset.m=mode();cm.classList.toggle('v',isV());vf.classList.toggle('wide',isV());
  $('cmModes').innerHTML=MODES.map((m,i)=>((mi===2||mi===3)?(i===2||i===3):Math.abs(i-mi)<=1)?'<span data-i="'+i+'"'+(i===mi?' class="on"':'')+'>'+m[1]+'</span>':'').join('');
  $('cmVP').innerHTML=vres+' <i>'+vfps+'</i>';$('cmShutter').setAttribute('aria-label',isV()?'Record':'Take photo');
- QA('button',VO).forEach(b=>b.classList.toggle('on',b.dataset.r===vres||b.dataset.f===String(vfps)))};
+ QA('button',VO).forEach(b=>b.classList.toggle('on',b.dataset.r===vres||b.dataset.f===String(vfps)));
+ if(mode()!=='por'){$('cmPl').textContent='NATURAL LIGHT  \u0192/1.4';cm.classList.remove('face-found');clearInterval(portraitScan);portraitScan=0}
+ else startPortraitScan()};
 const setMode=i=>{i=Math.max(0,Math.min(MODES.length-1,i));if(i===mi)return;const was=isV();stopRec(1);mi=i;applyMode();P.classList.remove('on');VO.classList.remove('on');if(was!==isV()&&stream){stopCam();startCam()}};
 $('cmShutter').onclick=shoot;
 $('cmFile').onchange=async e=>{for(const f of e.target.files)await addBlob(f);e.target.value=''};
