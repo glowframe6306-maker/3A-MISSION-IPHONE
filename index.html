@@ -39,6 +39,325 @@
 }catch(e){}})();
 </script>
 
+<script id="cloud-sync">
+/* Cloud sync: keeps passcode, Face ID, photos, notes, files and progress identical in every browser / Chrome profile.
+   Everything is encrypted in the browser (AES-GCM, key derived from your sync key) and stored through /api/sync.
+   localStorage + the three IndexedDB databases are synced item by item. */
+(()=>{
+'use strict';
+const rootCls=document.documentElement.classList;
+if(rootCls.contains('pf-shell'))return;          /* outer laptop "phone frame": the inner frame runs the real app */
+if(location.protocol==='file:')return;           /* needs the deployed site */
+const N={set:Storage.prototype.setItem,rem:Storage.prototype.removeItem,clr:Storage.prototype.clear,get:Storage.prototype.getItem,key:Storage.prototype.key};
+const L=localStorage;
+const KNOWN={'photos3a':[{name:'p',keyPath:'id'}],'Mission2028Files':[{name:'files',keyPath:'id'}],'files3a-pdf':[{name:'f',keyPath:'id'}]};
+const PART=2400000;                               /* characters per uploaded part (server limit is ~4.4 MB) */
+const K_KEY='__3a_sync_key',K_BASE='__3a_sync_base',K_DIRTY='__3a_sync_dirty',K_LAST='__3a_sync_last',K_SKIP='__3a_sync_skip',K_RL='__3a_sync_rl';
+const internal=k=>typeof k==='string'&&(k.indexOf('__3a_sync')===0||/cache/i.test(k));
+const te=new TextEncoder(),td=new TextDecoder();
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const lget=k=>{try{return N.get.call(L,k)}catch(e){return null}};
+const lset=(k,v)=>{try{N.set.call(L,k,v)}catch(e){}};
+const ldel=k=>{try{N.rem.call(L,k)}catch(e){}};
+const jload=(k,d)=>{try{const v=JSON.parse(lget(k));return v&&typeof v==='object'?v:d}catch(e){return d}};
+function h53(s){let h1=0xdeadbeef,h2=0x41c6ce57;for(let i=0;i<s.length;i++){const c=s.charCodeAt(i);h1=Math.imul(h1^c,2654435761);h2=Math.imul(h2^c,1597334677)}h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);return (4294967296*(2097151&h2)+(h1>>>0)).toString(36)+'.'+s.length}
+
+let KEY=lget(K_KEY)||'';
+let base=jload(K_BASE,{items:{}});if(!base.items)base.items={};
+let dirty=jload(K_DIRTY,{i:{},s:{}});if(!dirty.i)dirty.i={};if(!dirty.s)dirty.s={};
+let frozen=false,applying=0,booted=false,running=false,again=false,timer=null,CK=null,pendingPull=0;
+const status={state:KEY?'idle':'nokey',msg:'',last:+lget(K_LAST)||0};
+const saveBase=()=>lset(K_BASE,JSON.stringify(base));
+const saveDirty=()=>lset(K_DIRTY,JSON.stringify(dirty));
+
+/* ---------------- change tracking ---------------- */
+function schedule(ms){if(!KEY||!booted||frozen)return;clearTimeout(timer);timer=setTimeout(()=>runSync('push'),ms==null?4000:ms)}
+Storage.prototype.setItem=function(k){if(frozen&&this===L)return;const r=N.set.apply(this,arguments);if(this===L&&!internal(k))schedule();return r};
+Storage.prototype.removeItem=function(k){if(frozen&&this===L)return;const r=N.rem.apply(this,arguments);if(this===L&&!internal(k))schedule();return r};
+Storage.prototype.clear=function(){if(frozen&&this===L)return;const r=N.clr.apply(this,arguments);if(this===L)schedule();return r};
+try{
+ const P=IDBObjectStore.prototype,dbn=s=>{try{return s.transaction.db.name}catch(e){return''}};
+ const mark=(s,key)=>{const d=dbn(s);if(!KNOWN[d]||applying||frozen)return;
+  if(key===undefined)dirty.s[d+'|'+s.name]=1;else dirty.i[iid(d,s.name,key)]=1;saveDirty();schedule()};
+ ['put','add'].forEach(m=>{const o=P[m];P[m]=function(v,k){try{mark(this,k!==undefined?k:(v&&this.keyPath?v[this.keyPath]:undefined))}catch(e){}return o.apply(this,arguments)}});
+ const od=P.delete;P.delete=function(k){try{mark(this,(k&&typeof k==='object'&&!Array.isArray(k))?undefined:k)}catch(e){}return od.apply(this,arguments)};
+ const oc=P.clear;P.clear=function(){try{mark(this,undefined)}catch(e){}return oc.apply(this,arguments)};
+}catch(e){console.warn('sync: IndexedDB hooks failed',e)}
+const iid=(d,s,k)=>'idb:'+d+':'+s+':'+JSON.stringify(k);
+const parseIid=id=>{const m=/^idb:([^:]+):([^:]+):(.*)$/.exec(id);return m&&{db:m[1],store:m[2],key:JSON.parse(m[3])}};
+
+/* ---------------- value (de)serialisation (same format as the backup file) ---------------- */
+const b64=blob=>new Promise((ok,no)=>{const r=new FileReader();r.onload=()=>ok(String(r.result).split(',')[1]||'');r.onerror=()=>no(r.error);r.readAsDataURL(blob)});
+const bytes=s=>{const bin=atob(s),u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u};
+async function enc(v){
+ if(v===null||typeof v!=='object')return v;
+ if(v instanceof Blob){const o={__t:(typeof File!=='undefined'&&v instanceof File)?'file':'blob',type:v.type,data:await b64(v)};if(o.__t==='file'){o.name=v.name;o.lm=v.lastModified}return o}
+ if(v instanceof ArrayBuffer)return{__t:'ab',data:await b64(new Blob([v]))};
+ if(ArrayBuffer.isView(v))return{__t:'view',ctor:v.constructor.name,data:await b64(new Blob([v.buffer.slice(v.byteOffset,v.byteOffset+v.byteLength)]))};
+ if(v instanceof Date)return{__t:'date',v:v.getTime()};
+ if(Array.isArray(v)){const a=[];for(const x of v)a.push(await enc(x));return a}
+ const o={};for(const k of Object.keys(v))o[k]=await enc(v[k]);return o}
+function dec(v){
+ if(v===null||typeof v!=='object')return v;
+ if(Array.isArray(v))return v.map(dec);
+ switch(v.__t){
+  case'blob':return new Blob([bytes(v.data)],{type:v.type});
+  case'file':return new File([bytes(v.data)],v.name||'file',{type:v.type,lastModified:v.lm});
+  case'ab':return bytes(v.data).buffer;
+  case'view':{const C=window[v.ctor]||Uint8Array;return new C(bytes(v.data).buffer)}
+  case'date':return new Date(v.v)}
+ const o={};for(const k of Object.keys(v))o[k]=dec(v[k]);return o}
+
+/* ---------------- IndexedDB ---------------- */
+const rq=r=>new Promise((ok,no)=>{r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});
+const txdone=tx=>new Promise((ok,no)=>{tx.oncomplete=ok;tx.onerror=()=>no(tx.error);tx.onabort=()=>no(tx.error||new Error('aborted'))});
+const openDB=(name,ver)=>new Promise((ok,no)=>{const r=ver?indexedDB.open(name,1):indexedDB.open(name);
+ r.onupgradeneeded=()=>{for(const s of KNOWN[name])if(!r.result.objectStoreNames.contains(s.name))r.result.createObjectStore(s.name,{keyPath:s.keyPath})};
+ r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error);r.onblocked=()=>no(new Error('database busy'))});
+const open1=async n=>{try{return await openDB(n,true)}catch(e){return await openDB(n,false)}};
+async function localIdbKeys(){const out={};
+ for(const d of Object.keys(KNOWN)){const db=await open1(d);try{for(const s of KNOWN[d]){
+  if(!db.objectStoreNames.contains(s.name))continue;
+  const ks=await rq(db.transaction(s.name).objectStore(s.name).getAllKeys());
+  for(const k of ks)out[iid(d,s.name,k)]=1}}finally{db.close()}}
+ return out}
+async function idbGet(p){const db=await open1(p.db);try{if(!db.objectStoreNames.contains(p.store))return undefined;return await rq(db.transaction(p.store).objectStore(p.store).get(p.key))}finally{db.close()}}
+async function idbPut(p,row){const db=await open1(p.db);applying++;try{const tx=db.transaction(p.store,'readwrite');tx.objectStore(p.store).put(row);await txdone(tx)}finally{applying--;db.close()}}
+async function idbDel(p){const db=await open1(p.db);applying++;try{const tx=db.transaction(p.store,'readwrite');tx.objectStore(p.store).delete(p.key);await txdone(tx)}finally{applying--;db.close()}}
+
+/* ---------------- encryption ---------------- */
+async function deriveKey(secret){
+ const km=await crypto.subtle.importKey('raw',te.encode(secret),'PBKDF2',false,['deriveKey']);
+ return crypto.subtle.deriveKey({name:'PBKDF2',salt:te.encode('3a-mission-sync-v1'),iterations:120000,hash:'SHA-256'},km,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
+function u8b64(u){let s='';for(let i=0;i<u.length;i+=0x8000)s+=String.fromCharCode.apply(null,u.subarray(i,i+0x8000));return btoa(s)}
+async function encStr(str){const iv=crypto.getRandomValues(new Uint8Array(12));const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},CK,te.encode(str)));const o=new Uint8Array(12+ct.length);o.set(iv);o.set(ct,12);return u8b64(o)}
+async function decStr(s){const u=bytes(s);return td.decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:u.subarray(0,12)},CK,u.subarray(12)))}
+
+/* ---------------- server calls ---------------- */
+async function api(op,o){o=o||{};
+ const url=new URL('api/sync',location.href);url.searchParams.set('op',op);if(o.name)url.searchParams.set('name',o.name);
+ let last;
+ for(let a=0;a<3;a++){
+  try{
+   const r=await fetch(url,{method:o.body!=null?'POST':'GET',headers:Object.assign({'x-sync-key':KEY},o.body!=null?{'content-type':'text/plain'}:{}),body:o.body,cache:'no-store'});
+   if(r.status===404&&op==='get')return null;
+   if(r.status===401){const e=new Error('Wrong sync key.');e.fatal=true;throw e}
+   if(!r.ok){let m='';try{m=(await r.json()).error}catch(e){}const e=new Error(m||('Server error '+r.status));if(r.status<500){e.fatal=true}throw e}
+   return op==='get'?await r.text():await r.json()
+  }catch(e){last=e;if(e.fatal)throw e;await sleep(600*(a+1))}}
+ throw last}
+async function getManifest(){const t=await api('get',{name:'manifest'});if(t==null)return{items:{}};
+ const m=JSON.parse(await decStr(t));if(!m.items)m.items={};return m}
+async function putManifest(m){await api('put',{name:'manifest',body:await encStr(JSON.stringify(m))})}
+async function downloadItem(ent){const parts=[];for(let i=0;i<ent.n;i++){const t=await api('get',{name:ent.b+'.'+i});if(t==null)throw new Error('A cloud file is missing.');parts.push(t)}
+ return JSON.parse(await decStr(parts.join('')))}
+async function uploadItem(payload){
+ const text=await encStr(JSON.stringify(payload));const b='d/'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+ const n=Math.max(1,Math.ceil(text.length/PART));
+ for(let i=0;i<n;i++)await api('put',{name:b+'.'+i,body:text.slice(i*PART,(i+1)*PART)});
+ return{b,n}}
+
+/* ---------------- planning ---------------- */
+function lsSnapshot(){const o={};for(let i=0;i<L.length;i++){const k=N.key.call(L,i);if(!internal(k))o[k]=lget(k)}return o}
+async function plan(manifest,mode){
+ const prefer=mode==='boot'?'remote':'local';
+ const rem=manifest.items,B=base.items,pull=[],push=[];
+ const snap=lsSnapshot(),ids=new Set();
+ for(const k in snap)ids.add('ls:'+k);
+ for(const id in rem)if(id.indexOf('ls:')===0)ids.add(id);
+ for(const id in B)if(id.indexOf('ls:')===0)ids.add(id);
+ for(const id of ids){
+  const k=id.slice(3),has=Object.prototype.hasOwnProperty.call(snap,k),h=has?h53(snap[k]):null;
+  const R=rem[id],Bi=R?B[id]:undefined;                       /* base is meaningless if the cloud lost the entry */
+  const lc=h!==(Bi?Bi.h:null),rc=(R?R.ts:0)!==(Bi?Bi.ts:0);
+  if(!lc&&!rc)continue;
+  if(rc&&(!lc||prefer==='remote'))pull.push(id);else if(lc)push.push(id)}
+ /* IndexedDB records */
+ const local=await localIdbKeys(),idIds=new Set(Object.keys(local));
+ for(const id in rem)if(id.indexOf('idb:')===0)idIds.add(id);
+ for(const id in B)if(id.indexOf('idb:')===0)idIds.add(id);
+ const dStores=dirty.s;
+ for(const id of idIds){
+  const R=rem[id],Bi=R?B[id]:undefined,p=parseIid(id);if(!p||!KNOWN[p.db])continue;
+  const has=!!local[id],isDirty=!!dirty.i[id];
+  const rc=(R?R.ts:0)!==(Bi?Bi.ts:0);
+  let lc;
+  if(!Bi)lc=has;                                               /* never synced: new here */
+  else lc=isDirty||(!has&&!!dStores[p.db+'|'+p.store]);        /* edited, or removed (store was touched) */
+  if(!Bi&&!has&&R&&!R.d){pull.push(id);continue}
+  if(!lc&&!rc)continue;
+  if(!has&&!R)continue;
+  if(rc&&(!lc||prefer==='remote'))pull.push(id);else if(lc)push.push(id)}
+ return{pull,push,snap,local}}
+
+/* ---------------- run ---------------- */
+function setStatus(state,msg){status.state=state;status.msg=msg||'';try{window.dispatchEvent(new CustomEvent('cloudsync',{detail:status}))}catch(e){}paintBadge()}
+async function applyPull(ids,manifest,onProg){
+ let n=0;
+ for(const id of ids){
+  const R=manifest.items[id];onProg&&onProg(++n,ids.length);
+  if(id.indexOf('ls:')===0){const k=id.slice(3);
+   if(R.d)ldelRaw(k);else{const pl=await downloadItem(R);lsetRaw(k,pl.v)}
+  }else{const p=parseIid(id);
+   if(R.d)await idbDel(p);else{const pl=await downloadItem(R);await idbPut(p,dec(pl.row))}}
+  const h=id.indexOf('ls:')===0&&!R.d?h53(lget(id.slice(3))||''):undefined;
+  base.items[id]={h:id.indexOf('ls:')===0?(R.d?null:h):undefined,ts:R.ts};
+  if(id.indexOf('ls:')!==0)delete dirty.i[id];
+  if(n%5===0){saveBase();saveDirty()}}
+ saveBase();saveDirty()}
+const lsetRaw=(k,v)=>{try{N.set.call(L,k,v)}catch(e){}};const ldelRaw=k=>{try{N.rem.call(L,k)}catch(e){}};
+async function applyPush(ids,snap,local,onProg){
+ if(!ids.length)return;
+ const m=await getManifest();                                  /* re-read so other devices' newer entries are kept */
+ const garbage=[];let n=0;
+ for(const id of ids){
+  onProg&&onProg(++n,ids.length);const ts=Date.now()+n;let ent,h;
+  if(id.indexOf('ls:')===0){const k=id.slice(3);
+   if(Object.prototype.hasOwnProperty.call(snap,k)){h=h53(snap[k]);ent=Object.assign({ts},await uploadItem({v:snap[k]}))}else{ent={ts,d:1,n:0,b:''}}
+  }else{const p=parseIid(id);const row=local[id]?await idbGet(p):undefined;
+   if(row!==undefined){ent=Object.assign({ts},await uploadItem({row:await enc(row)}))}else{ent={ts,d:1,n:0,b:''}}}
+  const old=m.items[id];if(old&&old.b)for(let i=0;i<old.n;i++)garbage.push(old.b+'.'+i);
+  m.items[id]=ent;base.items[id]={h:id.indexOf('ls:')===0?(ent.d?null:h):undefined,ts:ts};
+  if(id.indexOf('ls:')!==0)delete dirty.i[id];
+  if(n%8===0){await putManifest(m);saveBase();saveDirty()}}
+ await putManifest(m);saveBase();
+ dirty.s={};saveDirty();
+ for(let i=0;i<garbage.length;i+=100)try{await api('del',{body:JSON.stringify(garbage.slice(i,i+100))})}catch(e){}}
+
+async function runSync(mode){
+ if(!KEY)return{ok:false,reason:'nokey'};
+ if(running){again=true;return{ok:false,reason:'busy'}}
+ running=true;let result={ok:true,pulled:0,pushed:0};
+ try{
+  if(!CK)CK=await deriveKey(KEY);
+  setStatus('syncing','Checking cloud…');
+  const manifest=await getManifest();
+  const pl=await plan(manifest,mode);
+  if(mode==='boot'){
+   if(pl.pull.length){
+    frozen=true;                                                /* nothing may overwrite what we are about to restore */
+    await applyPull(pl.pull,manifest,(a,b)=>progress('Downloading your data… '+a+' / '+b));
+    result.pulled=pl.pull.length;
+    const rl=jload(K_RL,{t:0,c:0});const fresh=Date.now()-rl.t<20000;
+    if(!(fresh&&rl.c>=2)){lset(K_RL,JSON.stringify({t:Date.now(),c:fresh?rl.c+1:1}));lset(K_LAST,String(Date.now()));progress('Done. Opening…');setTimeout(()=>location.reload(),300);return result}
+    frozen=false}
+  }else{pendingPull=pl.pull.length;paintBadge()}
+  if(pl.push.length){
+   setStatus('syncing','Uploading '+pl.push.length+' change'+(pl.push.length>1?'s':'')+'…');
+   await applyPush(pl.push,pl.snap,pl.local,(a,b)=>{if(mode==='boot')progress('Uploading… '+a+' / '+b)});
+   result.pushed=pl.push.length}
+  status.last=Date.now();lset(K_LAST,String(status.last));
+  setStatus('ok',pendingPull?'Newer data is waiting from another device.':'Up to date.');
+ }catch(e){
+  console.error('cloud sync',e);result={ok:false,error:e.message||String(e)};
+  if(e&&e.message==='Wrong sync key.'){setStatus('badkey','Wrong sync key.')}
+  else if(e&&e.name==='OperationError'){setStatus('badkey','This sync key does not match the data in the cloud.')}
+  else setStatus('error',e.message||'Sync failed.')
+ }finally{running=false;if(again){again=false;schedule(1500)}}
+ return result}
+
+/* ---------------- UI ---------------- */
+let root=null,badge=null,bar=null;
+const css='#csRoot{position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;background:rgba(0,0,0,.86);font:15px/1.45 -apple-system,system-ui,"Segoe UI",sans-serif;color:#fff;padding:20px;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}'
++'#csRoot .csC{width:min(380px,100%);background:#1c1c1e;border-radius:22px;padding:24px 22px;text-align:center;box-shadow:0 20px 60px #000a}'
++'#csRoot h2{margin:0 0 6px;font-size:21px}#csRoot p{margin:6px 0 14px;color:#c7c7cc;font-size:14px}'
++'#csRoot input{width:100%;box-sizing:border-box;background:#2c2c2e;border:1px solid #48484a;color:#fff;border-radius:12px;padding:13px;font-size:16px;outline:0;margin-bottom:10px;text-align:center}'
++'#csRoot button{display:block;width:100%;border:0;border-radius:12px;padding:13px;font-size:16px;font-weight:600;margin-top:8px;cursor:pointer;background:#0a84ff;color:#fff}#csRoot button.g{background:#2c2c2e;color:#0a84ff}'
++'#csRoot .csE{color:#ff453a;min-height:18px;font-size:13px;margin:0 0 4px}'
++'#csRoot .csSp{width:38px;height:38px;border-radius:50%;border:4px solid #3a3a3c;border-top-color:#0a84ff;margin:6px auto 14px;animation:csSp 1s linear infinite}@keyframes csSp{to{transform:rotate(360deg)}}'
++'#csBadge{position:fixed;right:10px;top:calc(env(safe-area-inset-top,0px) + 6px);z-index:2147483640;width:9px;height:9px;border-radius:50%;background:#30d158;opacity:.0;transition:opacity .3s;pointer-events:none}#csBadge.on{opacity:.8}#csBadge.busy{background:#ffd60a;opacity:.9}#csBadge.bad{background:#ff453a;opacity:.9}'
++'#csBar{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 16px);transform:translateX(-50%);z-index:2147483645;background:#0a84ff;color:#fff;border-radius:999px;padding:11px 18px;font:700 14px -apple-system,system-ui,sans-serif;box-shadow:0 6px 24px #0007;cursor:pointer}';
+function ensureStyle(){if(document.getElementById('csStyle'))return;const s=document.createElement('style');s.id='csStyle';s.textContent=css;(document.head||document.documentElement).appendChild(s)}
+function whenBody(fn){if(document.body)fn();else document.addEventListener('DOMContentLoaded',fn,{once:true})}
+function closeRoot(){if(root){root.remove();root=null}}
+function showCard(html){return new Promise(res=>{whenBody(()=>{ensureStyle();if(!root){root=document.createElement('div');root.id='csRoot';document.body.appendChild(root)}root.innerHTML='<div class="csC">'+html+'</div>';res(root)})})}
+function progress(msg){showCard('<div class="csSp"></div><h2>Syncing</h2><p>'+msg+'</p>')}
+function paintBadge(){whenBody(()=>{ensureStyle();
+ if(!badge){badge=document.createElement('div');badge.id='csBadge';document.body.appendChild(badge)}
+ badge.className=status.state==='syncing'?'on busy':(status.state==='badkey'||status.state==='error')?'on bad':status.state==='ok'?'on':'';
+ if(status.state==='ok'&&!pendingPull)setTimeout(()=>{if(status.state==='ok')badge.className=''},2500);
+ if(pendingPull&&!bar&&booted){bar=document.createElement('div');bar.id='csBar';bar.textContent='New data from another device — tap to update';bar.onclick=()=>location.reload();document.body.appendChild(bar)}
+ else if(!pendingPull&&bar){bar.remove();bar=null}})}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function askKey(opts){
+ opts=opts||{};
+ await showCard('<h2>Sync key</h2><p>'+(opts.intro||'Enter your sync key once on this browser profile. Your passcode, Face ID, photos and notes will then be the same everywhere.')+'</p>'
+  +'<input id="csIn" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Your secret sync key" value="'+esc(opts.value||'')+'"><div class="csE" id="csErr">'+esc(opts.err||'')+'</div>'
+  +'<button id="csGo">Connect</button><button class="g" id="csSkip">'+(opts.cancel||'Not now')+'</button>');
+ const inp=root.querySelector('#csIn');try{inp.focus()}catch(e){}}
+['pointerdown','pointerup','mousedown','mouseup','touchstart','touchend','keydown','keyup','keypress','input','focusin','click'].forEach(ev=>window.addEventListener(ev,e=>{
+ const t=e.target&&e.target.closest&&e.target.closest('#csRoot,#csBar,[data-cs]');if(!t)return;e.stopPropagation();
+ if(ev==='keydown'&&e.key==='Enter'&&e.target.id==='csIn'){e.preventDefault();doConnect()}
+ if(ev==='click')onClick(e.target.closest('button,[data-cs]')||e.target,e)},true));
+async function doConnect(){
+ const v=((root&&root.querySelector('#csIn'))||{}).value;const key=(v||'').trim();if(!key){setErr('Type your sync key.');return}
+ KEY=key;CK=null;setErr('Checking…');
+ try{
+  const pr=await fetch(new URL('api/sync?op=ping',location.href),{headers:{'x-sync-key':key},cache:'no-store'}).then(r=>r.json());
+  if(!pr.configured){KEY='';setErr('Sync is not set up on the server yet.');return}
+  if(!pr.auth){KEY='';setErr('That key is not correct.');return}
+ }catch(e){KEY='';setErr('Cannot reach the server. Check your internet.');return}
+ lset(K_KEY,key);ldel(K_SKIP);booted=false;
+ progress('Connecting…');
+ const r=await runSync('boot');
+ if(r&&r.ok&&!r.pulled){booted=true;closeRoot();startLive();toast('Cloud sync is on.')}
+ else if(r&&!r.ok){booted=true;await askKey({err:r.error||'Sync failed.',value:key})}}
+function setErr(m){const e=root&&root.querySelector('#csErr');if(e)e.textContent=m}
+function toast(msg){whenBody(()=>{let t=document.getElementById('csToast');if(!t){t=document.createElement('div');t.id='csToast';t.style.cssText='position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 70px);transform:translateX(-50%);max-width:88vw;background:#1c1c1e;color:#fff;font:600 14px/1.4 -apple-system,system-ui,sans-serif;padding:12px 18px;border-radius:14px;box-shadow:0 8px 30px #0008;z-index:2147483647;text-align:center';document.body.appendChild(t)}
+ t.textContent=msg;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',3500)})}
+async function onClick(el,e){
+ const id=(el&&(el.id||el.getAttribute&&el.getAttribute('data-cs')))||'';
+ if(id==='csGo')doConnect();
+ else if(id==='csSkip'){lset(K_SKIP,'1');closeRoot();if(!KEY)setStatus('nokey','')}
+ else if(id==='csBar')location.reload();
+ else if(id==='sxCsNow'){toast('Syncing…');const r=await runSync('push');toast(r&&r.ok?'Synced.':(r&&r.error)||'Sync failed.')}
+ else if(id==='sxCsKey')askKey({value:'',intro:'Enter the sync key for this app.',cancel:'Cancel'});
+ else if(id==='sxCsOff'){KEY='';CK=null;ldel(K_KEY);ldel(K_BASE);ldel(K_DIRTY);base={items:{}};dirty={i:{},s:{}};lset(K_SKIP,'1');setStatus('nokey','');toast('Cloud sync turned off on this browser.')}
+}
+
+/* settings panel (rendered by the Transfer Data page) */
+function ago(t){if(!t)return'never';const s=Math.round((Date.now()-t)/1000);if(s<60)return'just now';if(s<3600)return Math.round(s/60)+' min ago';if(s<86400)return Math.round(s/3600)+' h ago';return new Date(t).toLocaleDateString()}
+window.__cloud={
+ settingsHTML(){
+  const on=!!KEY,msg=!on?'Not connected. Enter your sync key to keep every browser profile identical automatically.':(status.state==='badkey'?'⚠︎ '+esc(status.msg):status.state==='error'?'⚠︎ '+esc(status.msg):'Connected · last synced '+ago(status.last));
+  return '<div class="sxT1" style="margin-top:22px">Cloud Sync</div><div class="sxF" style="margin-top:0">'+msg+'</div>'
+   +(on?'<button class="sxB" id="sxCsNow" data-cs="sxCsNow">Sync now</button>':'')
+   +'<button class="sxB" id="sxCsKey" data-cs="sxCsKey">'+(on?'Change sync key…':'Enter sync key…')+'</button>'
+   +(on?'<button class="sxB red" id="sxCsOff" data-cs="sxCsOff">Turn off on this browser</button>':'')
+   +'<div class="sxF">Everything is encrypted on this device before it is uploaded. Changes are sent a few seconds after you make them and new data is checked every time you open the app.</div>'},
+ status:()=>Object.assign({},status),sync:()=>runSync('push'),isOn:()=>!!KEY};
+
+/* ---------------- boot ---------------- */
+let liveOn=false;
+function startLive(){if(liveOn)return;liveOn=true;
+ const flush=()=>{if(KEY&&booted)runSync('push')};
+ document.addEventListener('visibilitychange',()=>{if(KEY&&booted)runSync('push')});
+ window.addEventListener('pagehide',()=>{if(KEY&&booted)runSync('push')});
+ window.addEventListener('online',flush);
+ setInterval(()=>{if(document.visibilityState==='visible')flush()},60000);
+ schedule(1500)}
+async function boot(){
+ /* link form: https://your-site/#sync=KEY  (key is removed from the address bar right away) */
+ try{const m=/[#&]sync=([^&]+)/.exec(location.hash);if(m){const k=decodeURIComponent(m[1]);history.replaceState(null,'',location.pathname+location.search);if(k){lset(K_KEY,k);ldel(K_SKIP);KEY=k}}}catch(e){}
+ let ping=null;
+ try{const r=await fetch(new URL('api/sync?op=ping',location.href),{headers:{'x-sync-key':KEY},cache:'no-store'});if(r.ok&&/json/.test(r.headers.get('content-type')||''))ping=await r.json()}catch(e){}
+ if(!ping||!ping.configured){setStatus(KEY?'error':'nokey',ping?'Sync is not set up on the server.':'Offline.');booted=true;if(KEY)window.addEventListener('online',()=>runSync('boot'),{once:true});return}
+ if(!KEY){booted=true;if(lget(K_SKIP)==='1'){setStatus('nokey','');return}
+  await askKey({});return}
+ if(!ping.auth){setStatus('badkey','Wrong sync key.');booted=true;await askKey({err:'The saved sync key is no longer correct.',value:KEY});return}
+ let t=setTimeout(()=>progress('Checking cloud…'),700);
+ const r=await runSync('boot');clearTimeout(t);
+ if(r&&r.pulled)return;                                         /* page is reloading */
+ booted=true;closeRoot();
+ if(!r.ok&&r.error&&status.state==='badkey')await askKey({err:r.error,value:KEY});
+ else startLive()
+}
+setStatus(KEY?'idle':'nokey','');
+boot().catch(e=>{console.error('cloud sync boot',e);booted=true;closeRoot()});
+})();
+</script>
+
+
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="theme-color" content="#000000">
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
@@ -4146,11 +4465,11 @@ function runImport(file){
  gate('Restore Backup',go)}
 function runExport(){gate('Export Backup',()=>{exportAll().catch(e=>{console.error(e);toast('Backup failed: '+(e&&e.message||e),6000)})})}
 window.__xfer={
- settingsHTML:()=>'<div class="sxT1">Transfer Data</div>'
+ settingsHTML:()=>('<div class="sxT1">Transfer Data</div>'
   +'<div class="sxF" style="margin-top:0">Moves everything in this app (passcode, Face ID, photos, notes, files, progress) to another Chrome profile or browser.</div>'
   +'<button class="sxB" id="sxXfOut">Export Backup File</button>'
   +'<button class="sxB" id="sxXfIn">Import Backup File…</button>'
-  +'<div class="sxF"><b>To copy to another profile:</b> 1) Export here. 2) Open this same app in the other profile. 3) On the passcode screen tap “Restore from backup file” (or Settings → Transfer Data → Import) and choose the file.<br><br>The backup holds your photos, Face ID data and passcode check, so keep the file private and delete it afterwards. Importing replaces everything in the profile you import into. Repeat the export/import whenever you change something and want the other profile to match.</div>',
+  +'<div class="sxF"><b>To copy to another profile:</b> 1) Export here. 2) Open this same app in the other profile. 3) On the passcode screen tap “Restore from backup file” (or Settings → Transfer Data → Import) and choose the file.<br><br>The backup holds your photos, Face ID data and passcode check, so keep the file private and delete it afterwards. Importing replaces everything in the profile you import into. Repeat the export/import whenever you change something and want the other profile to match.</div>')+(window.__cloud?window.__cloud.settingsHTML():''),
  exportAll:runExport,importFile:runImport};
 /* The app's full-screen script spends the tap's "user gesture" on every pointerdown/click, which blocks the file chooser.
    Handle our own buttons first (window capture phase) and keep those events away from it. */
@@ -4183,13 +4502,13 @@ const TK='<svg class="sxTick" viewBox="0 0 64 64"><circle cx="32" cy="32" r="28"
 const GL='<svg viewBox="0 0 64 64" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 22v-8a6 6 0 0 1 6-6h8M42 8h8a6 6 0 0 1 6 6v8M56 42v8a6 6 0 0 1-6 6h-8M22 56h-8a6 6 0 0 1-6-6v-8"/><path d="M24 26v4M40 26v4M32 28v8h-3M24 44q8 6 16 0"/></svg>';
 /* ---------- face engine (face-api.js, runs fully in the browser) ---------- */
 let libP;const lib=()=>libP||(libP=new Promise((res,rej)=>{const s=document.createElement('script');s.src=BASE+'dist/face-api.js';s.onload=async()=>{try{let ready=false;try{ready=await faceapi.tf.setBackend('webgl')}catch(e){console.warn('Face ID WebGL backend unavailable; trying CPU.',e)}if(!ready)ready=await faceapi.tf.setBackend('cpu');if(!ready)throw new Error('No supported TensorFlow.js backend is available.');await faceapi.tf.ready();const u=BASE+'model';await Promise.all([faceapi.nets.tinyFaceDetector.loadFromUri(u),faceapi.nets.faceLandmark68TinyNet.loadFromUri(u),faceapi.nets.faceRecognitionNet.loadFromUri(u)]);res()}catch(e){rej(e)}};s.onerror=rej;document.head.appendChild(s)}).catch(e=>{libP=null;throw e}));
-const cam=async(v,onStream)=>{if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('Camera API is not available. Open this page over HTTPS or localhost and allow camera access.');const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});if(onStream&&onStream(st)===false){st.getTracks().forEach(t=>t.stop());return null}v.srcObject=st;v.muted=true;v.setAttribute('playsinline','');await Promise.race([v.play(),wait(3000).then(()=>{throw new Error('Camera video did not start.')})]);return st};
+const cam=async(v,onStream)=>{const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});if(onStream&&onStream(st)===false){st.getTracks().forEach(t=>t.stop());return null}v.srcObject=st;v.muted=true;v.setAttribute('playsinline','');await v.play();return st};
 const stop=st=>st&&st.getTracks().forEach(t=>t.stop());
 const detOpts=(inputSize=224)=>new faceapi.TinyFaceDetectorOptions({inputSize,scoreThreshold:.05});
 const findFace=async v=>{let found=await faceapi.detectSingleFace(v,detOpts(160));if(!found)found=await faceapi.detectSingleFace(v,detOpts(320));return found};
 const det=v=>faceapi.detectSingleFace(v,detOpts()).withFaceLandmarks(true).withFaceDescriptor();
 const eyeRatio=eye=>{const d=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y),width=d(eye[0],eye[3]);return width>0?(d(eye[1],eye[5])+d(eye[2],eye[4]))/(2*width):0};
-const eyesOpen=sample=>{const p=sample&&sample.landmarks&&sample.landmarks.positions;if(!p||p.length<48)return false;return eyeRatio(p.slice(36,42))>=.12&&eyeRatio(p.slice(42,48))>=.12};
+const eyesOpen=sample=>{const p=sample&&sample.landmarks&&sample.landmarks.positions;if(!p||p.length<48)return false;return eyeRatio(p.slice(36,42))>=.18&&eyeRatio(p.slice(42,48))>=.18};
 const captureFrame=v=>{const c=document.createElement('canvas'),scale=Math.min(1,640/(v.videoWidth||640));c.width=Math.max(1,Math.round((v.videoWidth||640)*scale));c.height=Math.max(1,Math.round((v.videoHeight||480)*scale));c.getContext('2d',{willReadFrequently:true}).drawImage(v,0,0,c.width,c.height);return c};
 const zoomFrame=(frame,box)=>{const side=Math.min(frame.width,frame.height,Math.max(box.width,box.height)*2.6),x=Math.max(0,Math.min(frame.width-side,box.x+box.width/2-side/2)),y=Math.max(0,Math.min(frame.height-side,box.y+box.height/2-side/2)),c=document.createElement('canvas');c.width=c.height=320;c.getContext('2d',{willReadFrequently:true}).drawImage(frame,x,y,side,side,0,0,320,320);return c};
 const zoomedSample=async(frame,found,onZoom)=>{if(!found)return null;if(onZoom)onZoom();return det(zoomFrame(frame,found.box))};
@@ -4303,13 +4622,13 @@ function enroll(mode='owner'){
  const close=()=>{dead=1;stop(st);o.remove();view(cur)};$('.cn',o).onclick=close;
  const prog=()=>{const lit=Math.round(got/TOTAL*N);$$('line',o).forEach((l,i)=>l.classList.toggle('on',i<lit));pc.textContent=Math.round(got/TOTAL*100)+'%'};
  const poseOf=sample=>{const p=sample.landmarks.positions,eyeMidX=(p[36].x+p[45].x)/2,eyeMidY=(p[36].y+p[45].y)/2,eyeWidth=Math.hypot(p[45].x-p[36].x,p[45].y-p[36].y);return eyeWidth?{yaw:(p[30].x-eyeMidX)/eyeWidth,pitch:(p[30].y-eyeMidY)/eyeWidth}:null};
- const poseReady=(pose,stage)=>{if(!pose)return false;if(stage==='front')return Math.abs(pose.yaw)<.16;if(!baseline)return false;const yaw=pose.yaw-baseline.yaw,pitch=pose.pitch-baseline.pitch;if(stage==='left'||stage==='right')return Math.abs(yaw)>=.075;return stage==='up'||stage==='down'?Math.abs(pitch)>=.030:false};
- (async()=>{try{const cameraReady=cam(v).then(stream=>(st=stream));await Promise.all([cameraReady,warm()]);if(dead){stop(st);return}}catch(e){console.error('Face ID setup failed',e);hi.textContent='Face ID could not start. Open this page over HTTPS/localhost and allow camera access.';return}
+ const poseReady=(pose,stage)=>{if(!pose)return false;if(stage==='front')return Math.abs(pose.yaw)<.16;if(!baseline)return false;const yaw=pose.yaw-baseline.yaw,pitch=pose.pitch-baseline.pitch;return stage==='left'?yaw>.10:stage==='right'?yaw<-.10:stage==='up'?pitch<-.035:pitch>.035};
+ (async()=>{try{const cameraReady=cam(v).then(stream=>(st=stream));await Promise.all([cameraReady,warm()]);if(dead){stop(st);return}}catch(e){console.error('Face ID setup failed',e);hi.textContent='Face ID could not start. Check camera access and your internet connection.';return}
   for(let si=0;si<STEPS.length&&!dead;si++){const s=STEPS[si];let n=0,last=0,yawSum=0,pitchSum=0;poseCounts.push(0);dirEl.textContent='●';hi.textContent=(isBlocked?'Person to block · ':'')+s.label;
    while(!dead&&n<s.n){if(v.readyState<2||!v.videoWidth){await wait(100);continue}
     const frame=captureFrame(v);let found,r;
     try{found=await findFace(frame);if(found)r=await zoomedSample(frame,found)}catch(e){console.error('Face sample failed',e);hi.textContent='Face scan error. Please try again.';await wait(300);continue}
-    if(!r){hi.textContent=found?'Move closer and keep your whole face inside the circle.':'Move into frame and center your face.';await wait(100);continue}
+    if(!r){hi.textContent='';await wait(100);continue}
     if(!eyesOpen(r)){hi.textContent='Keep both eyes open.';await wait(100);continue}
     const pose=poseOf(r);if(!poseReady(pose,s.pose)){hi.textContent=s.label+' · adjust your head position';await wait(80);continue}
     if(Date.now()-last<130)continue;
@@ -5458,18 +5777,11 @@ function closeUI(){PEND=null;clearTimeout(tmr);try{speechSynthesis.cancel()}catc
 function armSilence(){clearTimeout(tmr);tmr=setTimeout(()=>{if(mode==='cmd'&&!busy&&!typed){chime(0);cap(t("I didn't catch that.",'මට ඇහුණේ නැහැ.'));tmr=setTimeout(closeUI,1600)}},9000)}
 /* ---------- speech recognition ---------- */
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;let rec=null,denied=0,gesture=0,deniedAt=0,rb=200,micErr='',micAsked=0,lastStart=0;
-const WAKE=/(?:\b(?:hey|hi|hello|hai|hay|ok|okay|yo)[\s,]+)?(?:\b(?:s[iye]r{1,2}[iye]{1,2}|sirius|[cz][iy]r[iy]e?|ser+i|sear+i|ce[e]?r+i)(?:'s)?\b|සිරි)/i;
+const WAKE=/(?:\b(?:hey|hi|hello|hai|hay|ok|okay|yo)[\s,]+)?(?:\b(?:s[iye]r{1,2}[iye]{1,2}|sirius|[cz][iy]r[iy]e?)(?:'s)?\b|සිරි)/i;
 const micOk=()=>{try{return(JSON.parse(localStorage.getItem('m3a_pv'))||{}).mic!==0}catch(_){return true}};
-const VOICE_PROFILE='m3a_siri_speaker_profile',SPEAKER_MODEL='onnx-community/wespeaker-voxceleb-resnet34-LM',SPEAKER_REV='6a61a1833ff2583aabeba044f5c8221f00b67ceb',SPEAKER_MATCH_LIMIT=.50;
+const VOICE_PROFILE='m3a_siri_speaker_profile',SPEAKER_MODEL='onnx-community/wespeaker-voxceleb-resnet34-LM',SPEAKER_REV='6a61a1833ff2583aabeba044f5c8221f00b67ceb',SPEAKER_MATCH_LIMIT=.60;
 let voiceProfile=null,voiceEngine=null,voiceScriptP=null,voiceStarting=null,voiceStream=null,voiceContext=null,voiceProcessor=null,voiceMuted=null,voiceSource=null,voiceRing=[],voicePending=[],voiceChecking=false,enrollmentActive=false;
 try{const p=JSON.parse(localStorage.getItem(VOICE_PROFILE)||'null');if(p&&Array.isArray(p.vector)&&p.vector.length>=128&&p.vector.every(Number.isFinite))voiceProfile={vector:Float32Array.from(p.vector)};else if(p)localStorage.removeItem(VOICE_PROFILE)}catch(e){console.error('Saved Siri voice profile could not be loaded.',e)}
-if(voiceProfile){
- document.addEventListener('pointerdown',()=>{
-  gesture=1;
-  ensureVoiceMonitoring().then(ready=>{if(ready)ensureRec()});
- },{once:true});
- setTimeout(()=>{if(!document.hidden&&S.wake&&micOk())ensureVoiceMonitoring().then(ready=>{if(ready)ensureRec()})},800);
-}
 try{localStorage.removeItem('m3a_siri_eagle_key');localStorage.removeItem('m3a_siri_eagle_profile')}catch(e){console.warn('Old Picovoice settings could not be cleared from this browser.',e)}
 const voiceStatus=message=>{const el=$('#sriVoiceStatus');if(el)el.textContent=message};
 function loadSpeakerModel(){
@@ -5510,32 +5822,19 @@ async function speakerEmbedding(pcm){const audio=Float32Array.from(pcm,x=>x/3276
 async function enrollVoice(){
  if(enrollmentActive)return;
  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){voiceStatus('Microphone access is not supported in this browser.');return}
- if(!window.isSecureContext){voiceStatus('Voice setup needs HTTPS or localhost so the browser may use the microphone.');return}
  let stream=null;enrollmentActive=true;killRec();voicePending=[];voiceStatus('Loading the local speaker model. No API key is needed.');
  try{
-  await Promise.race([loadSpeakerModel(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Voice model download timed out. Check your internet connection and try again.')),45000))]);
-  stream=voiceStream||await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});gesture=1;denied=0;micErr='';if(!voiceProcessor)startVoiceAudio(stream);
+  await loadSpeakerModel();stream=voiceStream||await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});gesture=1;denied=0;micErr='';if(!voiceProcessor)startVoiceAudio(stream);
   if(voiceContext.state==='suspended')await voiceContext.resume();
-  const deadline=Date.now()+60000,vectors=[],frameLength=24000,slideLength=8000;
-  voiceStatus('Recording… speak naturally for about 5 seconds. Keep talking until 2/2 is reached.');
-  while(vectors.length<2&&Date.now()<deadline){
+  const deadline=Date.now()+60000,vectors=[],frameLength=48000;
+  voiceStatus('Speak naturally for about 10 seconds. Audio is checked on this device only.');
+  while(vectors.length<3&&Date.now()<deadline){
    if(voicePending.length<frameLength){await new Promise(r=>setTimeout(r,40));continue}
    const frame=voicePending.splice(0,frameLength),energy=frame.reduce((sum,x)=>sum+x*x,0)/frame.length;
-   if(energy<500){
-    voiceStatus('Speak a little louder or move closer to the microphone. Recording…');
-    voicePending.splice(0,Math.max(0,slideLength-Math.min(voicePending.length,slideLength)));
-    continue
-   }
-   try{
-    vectors.push(await speakerEmbedding(frame));
-    voiceStatus('Recording your voice… '+vectors.length+'/2');
-   }catch(e){
-    console.error('Voice sample could not be processed.',e);
-    voiceStatus('The microphone is active, but this voice sample could not be processed. Keep speaking naturally.');
-   }
-   if(vectors.length<2&&voicePending.length<slideLength)await new Promise(r=>setTimeout(r,150));
+   if(energy<90000){voiceStatus('Speak a little louder to record a clear voice sample.');continue}
+   vectors.push(await speakerEmbedding(frame));voiceStatus('Recording your voice… '+vectors.length+'/3')
   }
-  if(vectors.length<2)throw new Error('No clear voice samples were recorded. Make sure microphone permission is allowed, move closer, and speak continuously in a quiet room.');
+  if(vectors.length<3)throw new Error('Voice enrollment timed out. Try again in a quiet room while speaking clearly.');
   const avg=Float32Array.from(vectors[0],(_,i)=>vectors.reduce((sum,v)=>sum+v[i],0)/vectors.length);voiceProfile={vector:normalizeEmbedding(avg)};localStorage.setItem(VOICE_PROFILE,JSON.stringify({vector:Array.from(voiceProfile.vector,x=>+x.toFixed(6))}));
   voiceStatus('Your voice profile is saved on this device.');
  }catch(e){console.error('Siri voice enrollment failed.',e);voiceStatus(e.message||'Voice setup failed. Check your connection and try again.')}
@@ -5900,7 +6199,7 @@ window.__siriTest=q=>handle(q);window.__siri={open:activate,status:()=>!S.wake?'
   return siriHTML()}};
 document.addEventListener('change',e=>{const r=$('#sxRoot');if(!r||!r.contains(e.target))return;const k=e.target.dataset&&e.target.dataset.k;
  if(k==='at_on'){AT.on=e.target.checked?1:0;saveAT();sync();atLayout();atWake();window.__sxNav&&window.__sxNav.view('at');return}
- if(k&&k.startsWith('sr_')){S[k.slice(3)]=e.target.checked?1:0;save();sync();if(k==='sr_wake'){if(S.wake){gesture=1;if(voiceProfile)ensureVoiceMonitoring().then(ready=>{if(ready)ensureRec()});else ensureRec()}else{killRec();stopVoiceAudio()}}}
+ if(k&&k.startsWith('sr_')){S[k.slice(3)]=e.target.checked?1:0;save();sync();if(k==='sr_wake'){if(S.wake)ensureRec();else{killRec();stopVoiceAudio()}}}
  if(e.target.id==='sriKey'){S.key=e.target.value.trim();save()}});
 document.addEventListener('click',e=>{const r=$('#sxRoot'),b=e.target.closest&&e.target.closest('[data-sr]');if(!r||!b||!r.contains(b))return;const k=b.dataset.sr,y=r.scrollTop,cur=window.__sxNav?window.__sxNav.cur():'siri';
  if(k==='voice-enroll'){gesture=1;enrollVoice();return}

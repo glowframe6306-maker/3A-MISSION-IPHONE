@@ -1,0 +1,16 @@
+3A MISSION - Cloud Sync setup (eka parak witharai)
+
+1) Me folder eka Vercel ekata deploy karanna (kalin wage). package.json + api/sync.js eka ekka yanawa.
+2) Vercel -> oyage project -> Storage -> Create -> Blob -> project ekata connect karanna.
+   (BLOB_READ_WRITE_TOKEN kiyana variable eka auto ekathu wenawa.)
+3) Vercel -> Settings -> Environment Variables -> aluth ekak:
+      Name : SYNC_KEY
+      Value: lamayekuta hithaganna bari nathi, deergha secret ekak (udaharana: mission-8f3k29xq-p0z7w-2028)
+   Save karala -> Deployments -> Redeploy.
+4) Edam Chrome profile eke site eka open karanna. "Sync key" screen eka enawa -> SYNC_KEY eka gahala Connect.
+   Anith profile / phone ekath ehemai (eka parak key eka gahanna).
+   Short cut: https://oyage-site/#sync=OYAGE_KEY  kiyala open kalath key eka auto set wenawa.
+5) Settings -> Transfer Data -> yata thiyenawa "Cloud Sync" (Sync now / key maaru / off).
+
+Eka profile ekaka thiyena data, anith profile eke open karama auto enawa. Photo ekak add kalama thapparu 4kin cloud ekata yanawa.
+Data okkoma browser eke encrypt wela thamai upload wenne.
