@@ -5509,26 +5509,26 @@ async function enrollVoice(){
   await Promise.race([loadSpeakerModel(),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Voice model download timed out. Check your internet connection and try again.')),45000))]);
   stream=voiceStream||await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1}});gesture=1;denied=0;micErr='';if(!voiceProcessor)startVoiceAudio(stream);
   if(voiceContext.state==='suspended')await voiceContext.resume();
-  const deadline=Date.now()+90000,vectors=[],frameLength=48000,slideLength=16000;
-  voiceStatus('Recording… speak naturally for about 10 seconds. Keep talking until 3/3 is reached.');
-  while(vectors.length<3&&Date.now()<deadline){
+  const deadline=Date.now()+60000,vectors=[],frameLength=24000,slideLength=8000;
+  voiceStatus('Recording… speak naturally for about 5 seconds. Keep talking until 2/2 is reached.');
+  while(vectors.length<2&&Date.now()<deadline){
    if(voicePending.length<frameLength){await new Promise(r=>setTimeout(r,40));continue}
    const frame=voicePending.splice(0,frameLength),energy=frame.reduce((sum,x)=>sum+x*x,0)/frame.length;
-   if(energy<5000){
+   if(energy<500){
     voiceStatus('Speak a little louder or move closer to the microphone. Recording…');
     voicePending.splice(0,Math.max(0,slideLength-Math.min(voicePending.length,slideLength)));
     continue
    }
    try{
     vectors.push(await speakerEmbedding(frame));
-    voiceStatus('Recording your voice… '+vectors.length+'/3');
+    voiceStatus('Recording your voice… '+vectors.length+'/2');
    }catch(e){
     console.error('Voice sample could not be processed.',e);
     voiceStatus('The microphone is active, but this voice sample could not be processed. Keep speaking naturally.');
    }
-   if(vectors.length<3&&voicePending.length<slideLength)await new Promise(r=>setTimeout(r,200));
+   if(vectors.length<2&&voicePending.length<slideLength)await new Promise(r=>setTimeout(r,150));
   }
-  if(vectors.length<3)throw new Error('Voice enrollment timed out. Try again in a quiet room while speaking clearly.');
+  if(vectors.length<2)throw new Error('No clear voice samples were recorded. Make sure microphone permission is allowed, move closer, and speak continuously in a quiet room.');
   const avg=Float32Array.from(vectors[0],(_,i)=>vectors.reduce((sum,v)=>sum+v[i],0)/vectors.length);voiceProfile={vector:normalizeEmbedding(avg)};localStorage.setItem(VOICE_PROFILE,JSON.stringify({vector:Array.from(voiceProfile.vector,x=>+x.toFixed(6))}));
   voiceStatus('Your voice profile is saved on this device.');
  }catch(e){console.error('Siri voice enrollment failed.',e);voiceStatus(e.message||'Voice setup failed. Check your connection and try again.')}
