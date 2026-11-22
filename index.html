@@ -160,7 +160,7 @@ async function uploadItem(payload){
 /* ---------------- planning ---------------- */
 function lsSnapshot(){const o={};for(let i=0;i<L.length;i++){const k=N.key.call(L,i);if(!internal(k))o[k]=lget(k)}return o}
 async function plan(manifest,mode){
- const prefer=mode==='boot'?'remote':'local';
+ const prefer=(mode==='boot'||mode==='push'||mode==='auto')?'remote':'local';
  const rem=manifest.items,B=base.items,pull=[],push=[];
  const snap=lsSnapshot(),ids=new Set();
  for(const k in snap)ids.add('ls:'+k);
@@ -241,7 +241,16 @@ async function runSync(mode){
     const rl=jload(K_RL,{t:0,c:0});const fresh=Date.now()-rl.t<20000;
     if(!(fresh&&rl.c>=2)){lset(K_RL,JSON.stringify({t:Date.now(),c:fresh?rl.c+1:1}));lset(K_LAST,String(Date.now()));progress('Done. Opening…');setTimeout(()=>location.reload(),300);return result}
     frozen=false}
-  }else{pendingPull=pl.pull.length;paintBadge()}
+  }else if(pl.pull.length){
+   frozen=true;
+   await applyPull(pl.pull,manifest,()=>{});
+   result.pulled=pl.pull.length;
+   frozen=false;
+   status.last=Date.now();lset(K_LAST,String(status.last));
+   setStatus('ok','New data restored automatically.');
+   setTimeout(()=>location.reload(),150);
+   return result
+  }
   if(pl.push.length){
    setStatus('syncing','Uploading '+pl.push.length+' change'+(pl.push.length>1?'s':'')+'…');
    await applyPush(pl.push,pl.snap,pl.local,(a,b)=>{if(mode==='boot')progress('Uploading… '+a+' / '+b)});
@@ -271,13 +280,13 @@ function ensureStyle(){if(document.getElementById('csStyle'))return;const s=docu
 function whenBody(fn){if(document.body)fn();else document.addEventListener('DOMContentLoaded',fn,{once:true})}
 function closeRoot(){if(root){root.remove();root=null}}
 function showCard(html){return new Promise(res=>{whenBody(()=>{ensureStyle();if(!root){root=document.createElement('div');root.id='csRoot';document.body.appendChild(root)}root.innerHTML='<div class="csC">'+html+'</div>';res(root)})})}
-function progress(msg){showCard('<div class="csSp"></div><h2>Syncing</h2><p>'+msg+'</p>')}
+function progress(msg){/* Sync work stays fully in the background; no blocking popup is shown. */}
 function paintBadge(){whenBody(()=>{ensureStyle();
  if(!badge){badge=document.createElement('div');badge.id='csBadge';document.body.appendChild(badge)}
  badge.className=status.state==='syncing'?'on busy':(status.state==='badkey'||status.state==='error')?'on bad':status.state==='ok'?'on':'';
  if(status.state==='ok'&&!pendingPull)setTimeout(()=>{if(status.state==='ok')badge.className=''},2500);
- if(pendingPull&&!bar&&booted){bar=document.createElement('div');bar.id='csBar';bar.textContent='New data from another device — tap to update';bar.onclick=()=>location.reload();document.body.appendChild(bar)}
- else if(!pendingPull&&bar){bar.remove();bar=null}})}
+ if(pendingPull&&booted){pendingPull=0}
+ if(bar){bar.remove();bar=null}})}
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 async function askKey(opts){
  opts=opts||{};
