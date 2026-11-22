@@ -5458,11 +5458,18 @@ function closeUI(){PEND=null;clearTimeout(tmr);try{speechSynthesis.cancel()}catc
 function armSilence(){clearTimeout(tmr);tmr=setTimeout(()=>{if(mode==='cmd'&&!busy&&!typed){chime(0);cap(t("I didn't catch that.",'මට ඇහුණේ නැහැ.'));tmr=setTimeout(closeUI,1600)}},9000)}
 /* ---------- speech recognition ---------- */
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;let rec=null,denied=0,gesture=0,deniedAt=0,rb=200,micErr='',micAsked=0,lastStart=0;
-const WAKE=/(?:\b(?:hey|hi|hello|hai|hay|ok|okay|yo)[\s,]+)?(?:\b(?:s[iye]r{1,2}[iye]{1,2}|sirius|[cz][iy]r[iy]e?)(?:'s)?\b|සිරි)/i;
+const WAKE=/(?:\b(?:hey|hi|hello|hai|hay|ok|okay|yo)[\s,]+)?(?:\b(?:s[iye]r{1,2}[iye]{1,2}|sirius|[cz][iy]r[iy]e?|ser+i|sear+i|ce[e]?r+i)(?:'s)?\b|සිරි)/i;
 const micOk=()=>{try{return(JSON.parse(localStorage.getItem('m3a_pv'))||{}).mic!==0}catch(_){return true}};
-const VOICE_PROFILE='m3a_siri_speaker_profile',SPEAKER_MODEL='onnx-community/wespeaker-voxceleb-resnet34-LM',SPEAKER_REV='6a61a1833ff2583aabeba044f5c8221f00b67ceb',SPEAKER_MATCH_LIMIT=.60;
+const VOICE_PROFILE='m3a_siri_speaker_profile',SPEAKER_MODEL='onnx-community/wespeaker-voxceleb-resnet34-LM',SPEAKER_REV='6a61a1833ff2583aabeba044f5c8221f00b67ceb',SPEAKER_MATCH_LIMIT=.50;
 let voiceProfile=null,voiceEngine=null,voiceScriptP=null,voiceStarting=null,voiceStream=null,voiceContext=null,voiceProcessor=null,voiceMuted=null,voiceSource=null,voiceRing=[],voicePending=[],voiceChecking=false,enrollmentActive=false;
 try{const p=JSON.parse(localStorage.getItem(VOICE_PROFILE)||'null');if(p&&Array.isArray(p.vector)&&p.vector.length>=128&&p.vector.every(Number.isFinite))voiceProfile={vector:Float32Array.from(p.vector)};else if(p)localStorage.removeItem(VOICE_PROFILE)}catch(e){console.error('Saved Siri voice profile could not be loaded.',e)}
+if(voiceProfile){
+ document.addEventListener('pointerdown',()=>{
+  gesture=1;
+  ensureVoiceMonitoring().then(ready=>{if(ready)ensureRec()});
+ },{once:true});
+ setTimeout(()=>{if(!document.hidden&&S.wake&&micOk())ensureVoiceMonitoring().then(ready=>{if(ready)ensureRec()})},800);
+}
 try{localStorage.removeItem('m3a_siri_eagle_key');localStorage.removeItem('m3a_siri_eagle_profile')}catch(e){console.warn('Old Picovoice settings could not be cleared from this browser.',e)}
 const voiceStatus=message=>{const el=$('#sriVoiceStatus');if(el)el.textContent=message};
 function loadSpeakerModel(){
@@ -5893,7 +5900,7 @@ window.__siriTest=q=>handle(q);window.__siri={open:activate,status:()=>!S.wake?'
   return siriHTML()}};
 document.addEventListener('change',e=>{const r=$('#sxRoot');if(!r||!r.contains(e.target))return;const k=e.target.dataset&&e.target.dataset.k;
  if(k==='at_on'){AT.on=e.target.checked?1:0;saveAT();sync();atLayout();atWake();window.__sxNav&&window.__sxNav.view('at');return}
- if(k&&k.startsWith('sr_')){S[k.slice(3)]=e.target.checked?1:0;save();sync();if(k==='sr_wake'){if(S.wake)ensureRec();else{killRec();stopVoiceAudio()}}}
+ if(k&&k.startsWith('sr_')){S[k.slice(3)]=e.target.checked?1:0;save();sync();if(k==='sr_wake'){if(S.wake){gesture=1;if(voiceProfile)ensureVoiceMonitoring().then(ready=>{if(ready)ensureRec()});else ensureRec()}else{killRec();stopVoiceAudio()}}}
  if(e.target.id==='sriKey'){S.key=e.target.value.trim();save()}});
 document.addEventListener('click',e=>{const r=$('#sxRoot'),b=e.target.closest&&e.target.closest('[data-sr]');if(!r||!b||!r.contains(b))return;const k=b.dataset.sr,y=r.scrollTop,cur=window.__sxNav?window.__sxNav.cur():'siri';
  if(k==='voice-enroll'){gesture=1;enrollVoice();return}
