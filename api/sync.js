@@ -13,6 +13,17 @@ const { put, get, list, del } = require('@vercel/blob');
 const PREFIX = '3a-sync/';
 const MAX_BODY = 4 * 1024 * 1024; /* Vercel functions accept at most ~4.5 MB per request */
 const NAME_RE = /^[A-Za-z0-9._\/-]{1,160}$/;
+const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
+
+async function blobReady() {
+  if (!blobToken) return { ready: false, error: 'BLOB_READ_WRITE_TOKEN is missing. Connect a Vercel Blob store to this project.' };
+  try {
+    await list({ prefix: PREFIX, limit: 1, token: blobToken });
+    return { ready: true, error: '' };
+  } catch (e) {
+    return { ready: false, error: 'Vercel Blob rejected the store token (403/credentials). Reconnect the private Blob store and redeploy.' };
+  }
+}
 
 function authOk(req) {
   const want = process.env.SYNC_KEY;
@@ -38,16 +49,16 @@ function readBody(req) {
 }
 
 async function readText(pathname) {
-  const r = await get(pathname, { access: 'private', useCache: false });
+  const r = await get(pathname, { access: 'private', useCache: false, token: blobToken });
   if (!r || r.statusCode !== 200 || !r.stream) return null;
   return await new Response(r.stream).text();
 }
 
 async function removeOne(pathname) {
-  try { await del(pathname); return true; } catch (e) { /* fall back to url lookup */ }
-  const r = await list({ prefix: pathname, limit: 10 });
+  try { await del(pathname, { token: blobToken }); return true; } catch (e) { /* fall back to url lookup */ }
+  const r = await list({ prefix: pathname, limit: 10, token: blobToken });
   const hit = r.blobs.find((x) => x.pathname === pathname);
-  if (hit) { await del(hit.url); return true; }
+  if (hit) { await del(hit.url, { token: blobToken }); return true; }
   return false;
 }
 
@@ -59,9 +70,12 @@ module.exports = async (req, res) => {
     const name = url.searchParams.get('name') || '';
 
     if (op === 'ping') {
+      const blob = await blobReady();
       res.status(200).json({
-        configured: !!process.env.SYNC_KEY,
+        configured: !!process.env.SYNC_KEY && blob.ready,
         auth: authOk(req),
+        blobConfigured: blob.ready,
+        blobError: blob.error,
       });
       return;
     }
@@ -70,6 +84,8 @@ module.exports = async (req, res) => {
       return;
     }
     if (!authOk(req)) { res.status(401).json({ error: 'Wrong sync key.' }); return; }
+    const blob = await blobReady();
+    if (!blob.ready) { res.status(503).json({ error: blob.error }); return; }
 
     if (op === 'get') {
       if (!NAME_RE.test(name)) { res.status(400).json({ error: 'Bad name.' }); return; }
@@ -89,6 +105,7 @@ module.exports = async (req, res) => {
         allowOverwrite: true,
         contentType: 'text/plain',
         cacheControlMaxAge: 60,
+        token: blobToken,
       });
       res.status(200).json({ ok: true, bytes: body.length });
       return;

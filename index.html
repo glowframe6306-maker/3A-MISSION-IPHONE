@@ -303,8 +303,8 @@ async function doConnect(){
  KEY=key;CK=null;setErr('Checking…');
  try{
   const pr=await fetch(new URL('api/sync?op=ping',location.href),{headers:{'x-sync-key':key},cache:'no-store'}).then(r=>r.json());
-  if(!pr.configured){KEY='';setErr('Sync is not set up on the server yet.');return}
   if(!pr.auth){KEY='';setErr('That key is not correct.');return}
+  if(!pr.configured){KEY='';setErr(pr.blobError||'Sync is not set up on the server yet.');return}
  }catch(e){KEY='';setErr('Cannot reach the server. Check your internet.');return}
  lset(K_KEY,key);ldel(K_SKIP);booted=false;
  progress('Connecting…');
@@ -350,7 +350,7 @@ async function boot(){
  try{const m=/[#&]sync=([^&]+)/.exec(location.hash);if(m){const k=decodeURIComponent(m[1]);history.replaceState(null,'',location.pathname+location.search);if(k){lset(K_KEY,k);ldel(K_SKIP);KEY=k}}}catch(e){}
  let ping=null;
  try{const r=await fetch(new URL('api/sync?op=ping',location.href),{headers:{'x-sync-key':KEY},cache:'no-store'});if(r.ok&&/json/.test(r.headers.get('content-type')||''))ping=await r.json()}catch(e){}
- if(!ping||!ping.configured){setStatus(KEY?'error':'nokey',ping?'Sync is not set up on the server.':'Offline.');booted=true;if(KEY)window.addEventListener('online',()=>runSync('boot'),{once:true});return}
+ if(!ping||!ping.configured){setStatus(KEY?'error':'nokey',ping?(ping.blobError||ping.error||'Sync is not set up on the server.'):'Offline.');booted=true;if(KEY)window.addEventListener('online',()=>runSync('boot'),{once:true});return}
  if(!KEY){booted=true;if(lget(K_SKIP)==='1'){setStatus('nokey','');return}
   await askKey({});return}
  if(!ping.auth){setStatus('badkey','Wrong sync key.');booted=true;await askKey({err:'The saved sync key is no longer correct.',value:KEY});return}
