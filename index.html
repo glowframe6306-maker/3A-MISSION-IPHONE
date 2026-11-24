@@ -5931,7 +5931,7 @@ let voiceProfile=null,voiceEngine=null,voiceScriptP=null,voiceStarting=null,voic
 try{const p=JSON.parse(localStorage.getItem(VOICE_PROFILE)||'null');if(p&&Array.isArray(p.vector)&&p.vector.length>=128&&p.vector.every(Number.isFinite))voiceProfile={vector:Float32Array.from(p.vector)};else if(p)localStorage.removeItem(VOICE_PROFILE)}catch(e){console.error('Saved Siri voice profile could not be loaded.',e)}
 try{localStorage.removeItem('m3a_siri_eagle_key');localStorage.removeItem('m3a_siri_eagle_profile')}catch(e){console.warn('Old Picovoice settings could not be cleared from this browser.',e)}
 const voiceStatus=message=>{const el=$('#sriVoiceStatus');if(el)el.textContent=message};
-const VOICE_CLONE_DB='m3a_siri_voice_clone',VOICE_CLONE_PROMPT='Hello, this is my voice. I am setting up Siri to speak in my voice. Today is a good day to learn something new.';
+const VOICE_CLONE_DB='m3a_siri_voice_clone',VOICE_CLONE_PROMPT='Hello, this is my voice. I am setting up Siri to speak in my voice.';
 let voiceCloneWorker=null,voiceCloneReady=false,voiceCloneLoadPromise=null,voiceCloneLoadResolve=null,voiceCloneLoadReject=null,voiceCloneJob=0,voiceClonePending=new Map(),voiceCloneAudio=null,voiceCloneAudioUrl=null;
 function voiceCloneDb(action,mode){
  return new Promise((resolve,reject)=>{const open=indexedDB.open(VOICE_CLONE_DB,1);
@@ -5959,7 +5959,7 @@ function failVoiceCloneWorker(error){
  const failure=error instanceof Error?error:new Error(String(error||'Local voice clone worker failed.'));
  if(voiceCloneLoadReject){voiceCloneLoadReject(failure);voiceCloneLoadResolve=voiceCloneLoadReject=null;voiceCloneLoadPromise=null}
  for(const pending of voiceClonePending.values())pending.reject(failure);
- voiceClonePending.clear();voiceCloneReady=false;
+ voiceClonePending.clear();voiceCloneJob=0;voiceCloneReady=false;
  if(voiceCloneWorker){voiceCloneWorker.terminate();voiceCloneWorker=null}
 }
 function createVoiceCloneWorker(){
@@ -6402,7 +6402,7 @@ window.__sxParent=v=>({touch:'acc',at:'touch'}[v]||(v==='loc'||v==='bt'?'pv':'ma
 const siriHTML=()=>`<div class="sxT1">Siri & Search</div><div class="sxCard"><div class="sriO mini"><i class="a"></i><i class="b"></i><i class="c"></i></div><b>Siri</b><p>Say “Hey Siri”, “Hi Siri”, “Hello Siri” or just “Siri”, then ask anything — or choose Siri from the AssistiveTouch menu. Siri can open any app in 3A Mission, tell the time, weather, your exam countdown and more.</p></div>
  <div class="sxG">${rw('Listen for “Hey Siri”','wake')}${rw('Voice Feedback','voice')}${rw('Activation Sound','chime')}</div>
  <div class="sxF">Record your voice here. English Siri replies will be generated from your actual voice recording, not just its speaking style. Read this sentence clearly during setup: “${VOICE_CLONE_PROMPT}”</div>
- <div class="sxF">The first English reply downloads about 1.1 GB of local voice model data. Your recording and spoken text stay on this device; Sinhala replies still use the device voice. Local cloning is experimental and may not run on every phone.</div>
+ <div class="sxF">The first English reply downloads about 1.1 GB of local voice model data. Your recording and speech-generation text stay on this device; questions may still go to your configured answer service. Sinhala replies use the device voice. Local cloning is experimental and may not run on every phone.</div>
  <div class="sxF">Wake-word speaker model: <a href="https://huggingface.co/onnx-community/wespeaker-voxceleb-resnet34-LM" target="_blank" rel="noopener">WeSpeaker VoxCeleb ResNet34-LM</a> (CC BY 4.0). Local clone model: <a href="https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base" target="_blank" rel="noopener">Qwen3-TTS-12Hz-0.6B-Base</a> (Apache 2.0), with the <a href="https://github.com/fusor-rs/qwen3-tts-wasm" target="_blank" rel="noopener">fusor-ai browser runtime</a> (MIT). Browser speech-to-text may use its own service.</div>
  <div class="sxG"><button class="sxB" data-sr="voice-enroll">Record My Voice</button><button class="sxB red" data-sr="voice-remove" ${voiceProfile?'':'disabled'}>Remove Voice Recording and Profile</button></div><div class="sxF" id="sriVoiceStatus">${voiceProfile?'Your saved voice profile is on this device.':'Record your voice before enabling wake-word listening.'}</div>
  <div class="sxF">Microphone · ${micStatus()}</div>${denied?'<button class="sxB" data-sr="mic">Allow Microphone / Retry</button>':''}
