@@ -5898,8 +5898,20 @@ function sync(){const home=$('#iphoneHomeScreen'),onHome=!!home&&getComputedStyl
 /* ---------- sounds ---------- */
 let AC;function chime(up){if(!S.chime)return;try{AC=AC||new(window.AudioContext||window.webkitAudioContext)();const o=AC.createOscillator(),g=AC.createGain(),n=AC.currentTime;o.type='sine';o.frequency.setValueAtTime(up?660:880,n);o.frequency.exponentialRampToValueAtTime(up?990:520,n+.14);g.gain.setValueAtTime(.0001,n);g.gain.exponentialRampToValueAtTime(.12,n+.02);g.gain.exponentialRampToValueAtTime(.0001,n+.22);o.connect(g);g.connect(AC.destination);o.start(n);o.stop(n+.24)}catch(_){}}
 let speaking=0;
-function speak(x,cb){let done=0;const fin=()=>{if(done)return;done=1;speaking=0;cb&&cb();ensureRec()};
- if(!S.voice||!window.speechSynthesis){fin();return}speaking=1;try{speechSynthesis.cancel()}catch(_){}
+function speak(x,cb){let done=0;const fin=()=>{if(done)return;done=1;speaking=0;releaseVoiceCloneAudio();cb&&cb();ensureRec()};
+ if(!S.voice){fin();return}speaking=1;
+ if(S.lang==='en'){
+  try{speechSynthesis.cancel()}catch(_){}
+  cancelVoiceCloneJob();killRec();stopVoiceAudio();
+  synthesizeVoiceClone(x).then(wav=>{
+   if(!wav){voiceStatus('Record your voice in Siri settings to enable your voice. Using the device voice for now.');speakDeviceVoice(x,fin);return}
+   voiceCloneAudioUrl=URL.createObjectURL(new Blob([wav],{type:'audio/wav'}));voiceCloneAudio=new Audio(voiceCloneAudioUrl);voiceCloneAudio.onended=fin;voiceCloneAudio.onerror=()=>{cap('Your voice could not be played.');fin()};
+   voiceCloneAudio.play().catch(e=>{console.error('Local Siri voice playback failed.',e);cap('Your voice could not be played.');fin()})
+  }).catch(e=>{if(e&&e.name==='AbortError'){fin();return}console.error('Local Siri voice cloning failed.',e);cap('Local voice clone failed: '+(e.message||'try again.'));voiceStatus(e.message||'Local voice clone failed. Check storage and reload the app.');fin()});
+  return
+ }
+ if(!window.speechSynthesis){fin();return}speakDeviceVoice(x,fin)}
+function speakDeviceVoice(x,fin){try{speechSynthesis.cancel()}catch(_){}
  const u=new SpeechSynthesisUtterance(x),vs=speechSynthesis.getVoices(),w=S.lang==='si'?'si':'en',v=vs.find(v=>v.name===S.vname)||vs.find(v=>v.lang.toLowerCase().startsWith(w));
  if(v)u.voice=v;u.lang=v?v.lang:(S.lang==='si'?'si-LK':'en-US');u.rate=S.rate;u.onend=fin;u.onerror=fin;speechSynthesis.speak(u);setTimeout(fin,2500+x.length*110)}
 /* ---------- UI state ---------- */
@@ -5908,7 +5920,7 @@ const st=c=>{root.classList.remove('lis','thk','spk');c&&root.classList.add(c)};
 const cap=x=>{CAP.textContent=x};
 function card(x,links){CARD.classList.remove('on');CARD.textContent=x||'';(links||[]).forEach(l=>{const a=document.createElement('a');a.href=l.u;a.target='_blank';a.rel='noopener';a.textContent=l.l;CARD.appendChild(a)});if(x)requestAnimationFrame(()=>CARD.classList.add('on'))}
 function openUI(){if(!act()){root.classList.add('act');chime(1)}st('lis');card('');layout()}
-function closeUI(){PEND=null;clearTimeout(tmr);try{speechSynthesis.cancel()}catch(_){}speaking=0;busy=0;typed=0;mode='wake';cmdIdx=-1;root.classList.remove('act');st('');killRec();INP.blur();layout();setTimeout(ensureRec,400)}
+function closeUI(){PEND=null;clearTimeout(tmr);try{speechSynthesis.cancel()}catch(_){}cancelVoiceCloneJob();releaseVoiceCloneAudio();speaking=0;busy=0;typed=0;mode='wake';cmdIdx=-1;root.classList.remove('act');st('');killRec();INP.blur();layout();setTimeout(ensureRec,400)}
 function armSilence(){clearTimeout(tmr);tmr=setTimeout(()=>{if(mode==='cmd'&&!busy&&!typed){chime(0);cap(t("I didn't catch that.",'මට ඇහුණේ නැහැ.'));tmr=setTimeout(closeUI,1600)}},9000)}
 /* ---------- speech recognition ---------- */
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;let rec=null,denied=0,gesture=0,deniedAt=0,rb=200,micErr='',micAsked=0,lastStart=0;
@@ -5919,6 +5931,74 @@ let voiceProfile=null,voiceEngine=null,voiceScriptP=null,voiceStarting=null,voic
 try{const p=JSON.parse(localStorage.getItem(VOICE_PROFILE)||'null');if(p&&Array.isArray(p.vector)&&p.vector.length>=128&&p.vector.every(Number.isFinite))voiceProfile={vector:Float32Array.from(p.vector)};else if(p)localStorage.removeItem(VOICE_PROFILE)}catch(e){console.error('Saved Siri voice profile could not be loaded.',e)}
 try{localStorage.removeItem('m3a_siri_eagle_key');localStorage.removeItem('m3a_siri_eagle_profile')}catch(e){console.warn('Old Picovoice settings could not be cleared from this browser.',e)}
 const voiceStatus=message=>{const el=$('#sriVoiceStatus');if(el)el.textContent=message};
+const VOICE_CLONE_DB='m3a_siri_voice_clone',VOICE_CLONE_PROMPT='Hello, this is my voice. I am setting up Siri to speak in my voice. Today is a good day to learn something new.';
+let voiceCloneWorker=null,voiceCloneReady=false,voiceCloneLoadPromise=null,voiceCloneLoadResolve=null,voiceCloneLoadReject=null,voiceCloneJob=0,voiceClonePending=new Map(),voiceCloneAudio=null,voiceCloneAudioUrl=null;
+function voiceCloneDb(action,mode){
+ return new Promise((resolve,reject)=>{const open=indexedDB.open(VOICE_CLONE_DB,1);
+  open.onupgradeneeded=()=>{if(!open.result.objectStoreNames.contains('profile'))open.result.createObjectStore('profile',{keyPath:'id'})};
+  open.onerror=()=>reject(open.error||new Error('Voice storage could not be opened.'));
+  open.onsuccess=()=>{const db=open.result;let result;const tx=db.transaction('profile',mode);const req=action(tx.objectStore('profile'));
+   req.onsuccess=()=>{result=req.result};req.onerror=()=>{db.close();reject(req.error||new Error('Voice storage request failed.'))};
+   tx.oncomplete=()=>{db.close();resolve(result)};tx.onerror=()=>{db.close();reject(tx.error||new Error('Voice storage transaction failed.'))};tx.onabort=()=>{db.close();reject(tx.error||new Error('Voice storage transaction was aborted.'))}}
+ })
+}
+const saveVoiceCloneClip=(samples)=>voiceCloneDb(store=>store.put({id:'mine',sampleRate:24000,samples,transcript:VOICE_CLONE_PROMPT}),'readwrite');
+const getVoiceCloneClip=()=>voiceCloneDb(store=>store.get('mine'),'readonly');
+const deleteVoiceCloneClip=()=>voiceCloneDb(store=>store.delete('mine'),'readwrite');
+async function resampleVoiceCloneClip(samples){
+ if(typeof OfflineAudioContext==='undefined'||typeof AudioBuffer==='undefined')throw new Error('Local voice cloning needs offline audio support in this browser.');
+ const source=new AudioBuffer({length:samples.length,numberOfChannels:1,sampleRate:16000});source.copyToChannel(Float32Array.from(samples,x=>x/32768),0);
+ const output=new OfflineAudioContext(1,Math.ceil(samples.length*1.5),24000),node=output.createBufferSource();node.buffer=source;node.connect(output.destination);node.start();
+ return(await output.startRendering()).getChannelData(0).slice()
+}
+function releaseVoiceCloneAudio(){
+ if(voiceCloneAudio){voiceCloneAudio.onended=voiceCloneAudio.onerror=null;voiceCloneAudio.pause();voiceCloneAudio.removeAttribute('src');voiceCloneAudio.load();voiceCloneAudio=null}
+ if(voiceCloneAudioUrl){URL.revokeObjectURL(voiceCloneAudioUrl);voiceCloneAudioUrl=null}
+}
+function failVoiceCloneWorker(error){
+ const failure=error instanceof Error?error:new Error(String(error||'Local voice clone worker failed.'));
+ if(voiceCloneLoadReject){voiceCloneLoadReject(failure);voiceCloneLoadResolve=voiceCloneLoadReject=null;voiceCloneLoadPromise=null}
+ for(const pending of voiceClonePending.values())pending.reject(failure);
+ voiceClonePending.clear();voiceCloneReady=false;
+ if(voiceCloneWorker){voiceCloneWorker.terminate();voiceCloneWorker=null}
+}
+function createVoiceCloneWorker(){
+ if(voiceCloneWorker)return voiceCloneWorker;
+ const worker=new Worker(new URL('./voice-clone-worker.js',location.href),{type:'module',name:'siri-local-voice-clone'});
+ voiceCloneWorker=worker;
+ worker.onmessage=({data})=>{
+  if(data.type==='model-progress'){cap('Downloading local voice model · '+(data.total?Math.round(data.done/data.total*100):0)+'%');voiceStatus('Downloading local voice model… '+(data.total?Math.round(data.done/data.total*100):0)+'%');return}
+  if(data.type==='runtime'){cap('Preparing your local voice model…');return}
+  if(data.type==='ready'){voiceCloneReady=true;voiceCloneLoadResolve&&voiceCloneLoadResolve();voiceCloneLoadResolve=voiceCloneLoadReject=null;voiceCloneLoadPromise=null;voiceStatus('Local English voice model is ready on this device.');return}
+  if(data.type==='synthesis-progress'){cap('Speaking in your voice…');return}
+  if(data.type==='fatal'){failVoiceCloneWorker(data.message||'The local voice model stopped unexpectedly.');return}
+  if(data.type==='done'||data.type==='error'){
+   if(data.job){const pending=voiceClonePending.get(data.job);if(pending){voiceClonePending.delete(data.job);if(voiceCloneJob===data.job)voiceCloneJob=0;
+     if(data.type==='done'&&!data.stopped)pending.resolve(data.wav);else pending.reject(Object.assign(new Error(data.message||'Voice generation was stopped.'),{name:data.stopped?'AbortError':'Error'}))}}
+   else if(data.type!=='done')failVoiceCloneWorker(data.message||'The local voice model could not start.');
+  }
+ };
+ worker.onerror=event=>{event.preventDefault();failVoiceCloneWorker(new Error(event.message||'The local voice clone worker stopped unexpectedly.'))};
+ return worker
+}
+function ensureVoiceCloneModel(){
+ if(voiceCloneReady)return Promise.resolve();
+ if(voiceCloneLoadPromise)return voiceCloneLoadPromise;
+ voiceCloneLoadPromise=new Promise((resolve,reject)=>{voiceCloneLoadResolve=resolve;voiceCloneLoadReject=reject});
+ try{createVoiceCloneWorker().postMessage({type:'load'})}catch(e){failVoiceCloneWorker(e)}
+ return voiceCloneLoadPromise
+}
+async function synthesizeVoiceClone(text){
+ const clip=await getVoiceCloneClip();if(!clip)return null;
+ if(!(clip.samples instanceof Float32Array)||clip.samples.length<72000||clip.sampleRate!==24000)throw new Error('Your saved voice sample is invalid. Record your voice again.');
+ await ensureVoiceCloneModel();
+ const job=++voiceCloneJob,reference=clip.samples.slice();
+ return new Promise((resolve,reject)=>{voiceClonePending.set(job,{resolve,reject});voiceCloneJob=job;
+  try{voiceCloneWorker.postMessage({type:'generate',job,request:JSON.stringify({text,language:'english',reference_text:clip.transcript,seed:Date.now()>>>0}),reference},[reference.buffer])}
+  catch(e){voiceClonePending.delete(job);voiceCloneJob=0;reject(e)}
+ })
+}
+function cancelVoiceCloneJob(){if(voiceCloneWorker&&voiceCloneJob)voiceCloneWorker.postMessage({type:'stop',job:voiceCloneJob})}
 function loadSpeakerModel(){
  if(voiceEngine)return Promise.resolve(voiceEngine);
  if(voiceScriptP)return voiceScriptP;
@@ -5957,27 +6037,31 @@ async function speakerEmbedding(pcm){const audio=Float32Array.from(pcm,x=>x/3276
 async function enrollVoice(){
  if(enrollmentActive)return;
  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){voiceStatus('Microphone access is not supported in this browser.');return}
- let stream=null;enrollmentActive=true;killRec();voicePending=[];voiceStatus('Loading the local speaker model. No API key is needed.');
+ let stream=null;enrollmentActive=true;killRec();voicePending=[];voiceStatus('Loading voice recognition. Read the English setup sentence shown above clearly.');
  try{
   await loadSpeakerModel();stream=voiceStream||await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});gesture=1;denied=0;micErr='';if(!voiceProcessor)startVoiceAudio(stream);
   if(voiceContext.state==='suspended')await voiceContext.resume();
-  const deadline=Date.now()+60000,vectors=[],frameLength=48000;
-  voiceStatus('Speak naturally for about 10 seconds. Audio is checked on this device only.');
+  const deadline=Date.now()+60000,vectors=[],frames=[],frameLength=48000;
+  voiceStatus('Read the English setup sentence above aloud. Your recording stays on this device.');
   while(vectors.length<3&&Date.now()<deadline){
    if(voicePending.length<frameLength){await new Promise(r=>setTimeout(r,40));continue}
    const frame=voicePending.splice(0,frameLength),energy=frame.reduce((sum,x)=>sum+x*x,0)/frame.length;
    if(energy<90000){voiceStatus('Speak a little louder to record a clear voice sample.');continue}
-   vectors.push(await speakerEmbedding(frame));voiceStatus('Recording your voice… '+vectors.length+'/3')
+   vectors.push(await speakerEmbedding(frame));frames.push(frame);voiceStatus('Recording your voice… '+vectors.length+'/3')
   }
   if(vectors.length<3)throw new Error('Voice enrollment timed out. Try again in a quiet room while speaking clearly.');
+  const recorded=new Int16Array(frames.length*frameLength);frames.forEach((frame,index)=>recorded.set(frame,index*frameLength));
+  const cloneSamples=await resampleVoiceCloneClip(recorded);await saveVoiceCloneClip(cloneSamples);
   const avg=Float32Array.from(vectors[0],(_,i)=>vectors.reduce((sum,v)=>sum+v[i],0)/vectors.length);voiceProfile={vector:normalizeEmbedding(avg)};localStorage.setItem(VOICE_PROFILE,JSON.stringify({vector:Array.from(voiceProfile.vector,x=>+x.toFixed(6))}));
-  voiceStatus('Your voice profile is saved on this device.');
+  const removeButton=$('[data-sr="voice-remove"]');if(removeButton)removeButton.disabled=false;
+  voiceStatus('Your voice recording and recognition profile are saved on this device. English Siri replies can now use your voice.');
  }catch(e){console.error('Siri voice enrollment failed.',e);voiceStatus(e.message||'Voice setup failed. Check your connection and try again.')}
  finally{enrollmentActive=false;if(voiceStream===stream)voicePending=[];if(voiceProfile&&S.wake&&micOk()&&gesture&&!document.hidden){await ensureVoiceMonitoring().catch(e=>console.error('Siri voice recognition setup failed.',e));ensureRec()}else if(!enrollmentActive)stopVoiceAudio()}
 }
-function removeVoiceProfile(){
- if(!confirm('Remove your saved Siri voice profile from this device?'))return;
- voiceProfile=null;localStorage.removeItem(VOICE_PROFILE);voiceStatus('Voice profile removed. Set up your voice again to use wake words.');killRec();if(!enrollmentActive)stopVoiceAudio()
+async function removeVoiceProfile(){
+ if(!confirm('Remove your saved Siri voice recording and profile from this device?'))return;
+ try{await deleteVoiceCloneClip();voiceProfile=null;localStorage.removeItem(VOICE_PROFILE);const removeButton=$('[data-sr="voice-remove"]');if(removeButton)removeButton.disabled=true;voiceStatus('Your voice recording and profile were removed from this device.');killRec();if(!enrollmentActive)stopVoiceAudio()}
+ catch(e){console.error('Saved Siri voice recording could not be removed.',e);voiceStatus('Your voice recording could not be removed. Check this browser’s storage and try again.')}
 }
 function killRec(){const r=rec;rec=null;if(r){r.onend=r.onresult=r.onerror=null;try{r.abort()}catch(_){}}}
 function ensureRec(){if(!SR||!S.wake||!micOk()||document.hidden){if(rec)killRec();if(voiceProcessor&&!enrollmentActive)stopVoiceAudio();return}if(voiceProfile&&(!voiceEngine||!voiceProcessor)&&gesture&&!denied&&!voiceStarting){ensureVoiceMonitoring().then(ready=>{if(ready)ensureRec()});return}if(rec||!gesture||denied||speaking||mode!=='wake'||!voiceProfile||!voiceEngine||!voiceProcessor){if(rec&&(!voiceProfile||!voiceEngine||!voiceProcessor)&&mode==='wake')killRec();return}startRec(false)}
@@ -6317,9 +6401,10 @@ const voices=()=>window.speechSynthesis?speechSynthesis.getVoices().filter(v=>/^
 window.__sxParent=v=>({touch:'acc',at:'touch'}[v]||(v==='loc'||v==='bt'?'pv':'main'));
 const siriHTML=()=>`<div class="sxT1">Siri & Search</div><div class="sxCard"><div class="sriO mini"><i class="a"></i><i class="b"></i><i class="c"></i></div><b>Siri</b><p>Say “Hey Siri”, “Hi Siri”, “Hello Siri” or just “Siri”, then ask anything — or choose Siri from the AssistiveTouch menu. Siri can open any app in 3A Mission, tell the time, weather, your exam countdown and more.</p></div>
  <div class="sxG">${rw('Listen for “Hey Siri”','wake')}${rw('Voice Feedback','voice')}${rw('Activation Sound','chime')}</div>
- <div class="sxF">Wake words are checked against your saved voice using a local open-source speaker model. No Picovoice account or AccessKey is needed. The first setup downloads about 7 MB of model data; your voice recording and profile stay in this browser on this device.</div>
- <div class="sxF">Speaker model: <a href="https://huggingface.co/onnx-community/wespeaker-voxceleb-resnet34-LM" target="_blank" rel="noopener">WeSpeaker VoxCeleb ResNet34-LM</a> (CC BY 4.0). Voice matching runs locally; browser speech-to-text may use its own speech service.</div>
- <div class="sxG"><button class="sxB" data-sr="voice-enroll">Set Up My Voice</button><button class="sxB red" data-sr="voice-remove" ${voiceProfile?'':'disabled'}>Remove Voice Profile</button></div><div class="sxF" id="sriVoiceStatus">${voiceProfile?'Saved voice profile is on this device.':'Set up your voice before enabling wake-word listening.'}</div>
+ <div class="sxF">Record your voice here. English Siri replies will be generated from your actual voice recording, not just its speaking style. Read this sentence clearly during setup: “${VOICE_CLONE_PROMPT}”</div>
+ <div class="sxF">The first English reply downloads about 1.1 GB of local voice model data. Your recording and spoken text stay on this device; Sinhala replies still use the device voice. Local cloning is experimental and may not run on every phone.</div>
+ <div class="sxF">Wake-word speaker model: <a href="https://huggingface.co/onnx-community/wespeaker-voxceleb-resnet34-LM" target="_blank" rel="noopener">WeSpeaker VoxCeleb ResNet34-LM</a> (CC BY 4.0). Local clone model: <a href="https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base" target="_blank" rel="noopener">Qwen3-TTS-12Hz-0.6B-Base</a> (Apache 2.0), with the <a href="https://github.com/fusor-rs/qwen3-tts-wasm" target="_blank" rel="noopener">fusor-ai browser runtime</a> (MIT). Browser speech-to-text may use its own service.</div>
+ <div class="sxG"><button class="sxB" data-sr="voice-enroll">Record My Voice</button><button class="sxB red" data-sr="voice-remove" ${voiceProfile?'':'disabled'}>Remove Voice Recording and Profile</button></div><div class="sxF" id="sriVoiceStatus">${voiceProfile?'Your saved voice profile is on this device.':'Record your voice before enabling wake-word listening.'}</div>
  <div class="sxF">Microphone · ${micStatus()}</div>${denied?'<button class="sxB" data-sr="mic">Allow Microphone / Retry</button>':''}
  <div class="sxG">${rw('Search on Home Screen','pill')}</div>
  <div class="sxG">${cy('Language','lang',S.lang==='si'?'සිංහල':'English')}${cy('Siri Voice','vname',S.vname||'Default')}${cy('Speaking Rate','rate',S.rate+'×')}${cy('Orb Style','theme',TH[S.theme][0])}</div>
